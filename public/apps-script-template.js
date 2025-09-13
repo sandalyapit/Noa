@@ -62,6 +62,17 @@ function doPost(e) {
       return jsonResponse(400, { success: false, error: 'Invalid JSON in request body' });
     }
 
+    // Token authentication
+    const props = PropertiesService.getScriptProperties();
+    const apiToken = props.getProperty('API_TOKEN');
+    
+    if (apiToken && (!payload.token || payload.token !== apiToken)) {
+      return jsonResponse(401, { 
+        success: false, 
+        error: 'Unauthorized: Invalid or missing API token' 
+      });
+    }
+
     // Validate action
     if (!payload.action) {
       return jsonResponse(400, { success: false, error: 'Missing required field: action' });
@@ -75,11 +86,40 @@ function doPost(e) {
     // Quick validation
     const validation = quickValidate(payload);
     if (!validation.valid) {
-      return jsonResponse(422, { 
-        success: false, 
-        error: 'Validation failed', 
-        details: validation.errors 
-      });
+      // Try hidden parser if available and validation failed
+      const parserUrl = props.getProperty('HIDDEN_PARSER_URL');
+      if (parserUrl) {
+        try {
+          const normalized = callHiddenParser(parserUrl, payload);
+          if (normalized && normalized.ok && normalized.data) {
+            payload = normalized.data; // Use normalized payload
+          } else {
+            return jsonResponse(422, { 
+              success: false, 
+              error: 'Validation failed', 
+              details: validation.errors,
+              needsNormalization: true,
+              normalizeError: normalized
+            });
+          }
+        } catch (normalizationError) {
+          console.error('Normalization failed:', normalizationError);
+          return jsonResponse(422, { 
+            success: false, 
+            error: 'Validation failed', 
+            details: validation.errors,
+            needsNormalization: true,
+            normalizeError: String(normalizationError)
+          });
+        }
+      } else {
+        return jsonResponse(422, { 
+          success: false, 
+          error: 'Validation failed', 
+          details: validation.errors,
+          needsNormalization: true
+        });
+      }
     }
 
     // Route to appropriate handler
@@ -744,4 +784,65 @@ function getOrCreateMetaSpreadsheet() {
   properties.setProperty(META_SPREADSHEET_PROP, metaSpreadsheet.getId());
   
   return metaSpreadsheet;
+}
+
+/**
+ * Calls the hidden parser service for data normalization
+ * @param {string} parserUrl - The hidden parser service URL
+ * @param {Object} rawPayload - The raw payload to normalize
+ * @returns {Object} Normalized payload or error
+ */
+function callHiddenParser(parserUrl, rawPayload) {
+  try {
+    const response = UrlFetchApp.fetch(`${parserUrl}/normalize`, {
+      method: 'POST',
+      contentType: 'application/json',
+      muteHttpExceptions: true,
+      payload: JSON.stringify({ raw: rawPayload }),
+      headers: {
+        'User-Agent': 'Smart-Spreadsheet-Assistant/1.0'
+      }
+    });
+    
+    const responseText = response.getContentText();
+    const result = JSON.parse(responseText);
+    
+    if (response.getResponseCode() !== 200) {
+      console.error('Hidden parser error:', response.getResponseCode(), responseText);
+      return { ok: false, error: `Parser returned ${response.getResponseCode()}` };
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('Hidden parser request failed:', error);
+    return { ok: false, error: String(error) };
+  }
+}
+
+/**
+ * Setup function to configure API tokens and URLs
+ * Run this once after deployment to set up authentication
+ */
+function setupConfiguration() {
+  const properties = PropertiesService.getScriptProperties();
+  
+  // Generate a random API token if not set
+  let apiToken = properties.getProperty('API_TOKEN');
+  if (!apiToken) {
+    apiToken = Utilities.getUuid();
+    properties.setProperty('API_TOKEN', apiToken);
+    console.log('Generated new API token:', apiToken);
+  }
+  
+  // Log current configuration (without sensitive data)
+  console.log('Current configuration:');
+  console.log('- API_TOKEN: ' + (apiToken ? '[SET]' : '[NOT SET]'));
+  console.log('- HIDDEN_PARSER_URL: ' + (properties.getProperty('HIDDEN_PARSER_URL') || '[NOT SET]'));
+  console.log('- META_SPREADSHEET_ID: ' + (properties.getProperty(META_SPREADSHEET_PROP) || '[NOT SET]'));
+  
+  return {
+    apiToken: apiToken,
+    hiddenParserUrl: properties.getProperty('HIDDEN_PARSER_URL'),
+    metaSpreadsheetId: properties.getProperty(META_SPREADSHEET_PROP)
+  };
 }

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import Header from '../../components/ui/Header';
 import Breadcrumb from '../../components/ui/Breadcrumb';
 import Button from '../../components/ui/Button';
 import Icon from '../../components/AppIcon';
@@ -273,8 +272,7 @@ const Dashboard = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header />
-      <main className="pt-16">
+      <main>
         <div className="max-w-7xl mx-auto px-6 py-8">
           {/* Breadcrumb */}
           <Breadcrumb />
@@ -337,13 +335,24 @@ const Dashboard = () => {
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 {filteredSpreadsheets?.length > 0 ? (
                   filteredSpreadsheets?.map((spreadsheet) => (
-                    <SpreadsheetCard
+                    <div
                       key={spreadsheet?.id}
-                      spreadsheet={spreadsheet}
-                      onEdit={handleSpreadsheetEdit}
-                      onDuplicate={handleSpreadsheetDuplicate}
-                      onDisconnect={handleSpreadsheetDisconnect}
-                    />
+                      data-context-menu={JSON.stringify({
+                        type: 'spreadsheet',
+                        id: spreadsheet.id,
+                        name: spreadsheet.name,
+                        spreadsheetId: spreadsheet.id,
+                        tabName: 'Sheet1', // Default tab name
+                        ...spreadsheet
+                      })}
+                    >
+                      <SpreadsheetCard
+                        spreadsheet={spreadsheet}
+                        onEdit={handleSpreadsheetEdit}
+                        onDuplicate={handleSpreadsheetDuplicate}
+                        onDisconnect={handleSpreadsheetDisconnect}
+                      />
+                    </div>
                   ))
                 ) : (
                   <div className="col-span-full">

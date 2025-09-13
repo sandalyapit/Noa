@@ -11,6 +11,8 @@ import geminiService from '../services/geminiService';
 const AIAssistantChat = ({ 
   sheetContext = null, 
   onActionGenerated = null,
+  onActionExecuted = null,
+  appsScriptService = null,
   disabled = false,
   className = ''
 }) => {

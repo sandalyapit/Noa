@@ -29,6 +29,12 @@ const Header = () => {
       path: '/spreadsheet-management',
       icon: 'FileSpreadsheet',
       tooltip: 'Manage and manipulate your spreadsheets'
+    },
+    {
+      label: 'Demo',
+      path: '/demo',
+      icon: 'Zap',
+      tooltip: 'Explore integrated features demo'
     }
   ];
 

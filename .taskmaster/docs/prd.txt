@@ -1,0 +1,656 @@
+Google Sheets Assistant - Product Requirements Document
+
+1. Tujuan Produk
+-----------------
+
+Membangun sebuah assistant yang memungkinkan user menghubungkan Google Sheets secara manual (paste URL/ID), melakukan discovery tab by name, memberikan schema-aware UI (auto-form generation, preview, dry-run) serta aksi terkontrol (read, add row, update cell) yang dieksekusi lewat Apps Script. Sistem harus aman (sanitasi), auditable (audit log + snapshots), dan toleran terhadap keluaran LLM (regex + schema + hidden LLM normalizer).
+
+2. Scope MVP (Apa yang Termasuk)
+---------------------------------
+
+**Frontend**: React + Tailwind UI untuk URL input, tab discovery, preview schema, dynamic form, dry-run + confirm flow.
+
+**Backend**: Apps Script web app exposing JSON API: listTabs, fetchTabData, readRange, addRow, updateCell, discoverAll (limited).
+
+**Validation**: lightweight regex + schema check client-side + server-side.
+
+**Hidden LLM normalizer** (middleware) untuk salvage malformed LLM outputs (optional, serverless).
+
+**Safety rails**: sanitization (formula injection prevention), audit log, snapshot on writes.
+
+**Telemetry**: event logs in meta spreadsheet.
+
+**No auto-global syncing by default** — manual sync via URL + tab name primary flow.
+
+### Tidak Termasuk dalam MVP:
+
+*   Multi-user OAuth onboarding flow beyond web app permissions
+    
+*   Heavy background ingestion of entire Drive
+    
+*   Role-based access in MVP
+    
+
+3. Stakeholders
+----------------
+
+**Primary user**: non-technical analyst / PM who wants quick spreadsheet automation and AI-driven edits without digging gid.
+
+**Internal admin / dev**: maintains Apps Script, hidden LLM middleware, and frontend.
+
+**Compliance/ops**: reviews logs, snapshots, and limits.
+
+4. Persona & Typical Job Stories
+---------------------------------
+
+**Analyst Anya**: "When I paste a spreadsheet URL, I want to pick the tab by human name and preview schema so I can run a query or append data safely."
+
+**PM Putra**: "When I ask the assistant to update a cell, I want to see a dry-run preview and an audit record of the change."
+
+**Dev Dita**: "When LLM returns malformed output, I want normalization middleware to fix it or signal failure."
+
+5. Core Features (dengan Acceptance Criteria Singkat)
+------------------------------------------------------
+
+### A. Manual URL Sync & Tab Discovery
+
+**Deskripsi**: User paste URL or raw spreadsheetId → frontend calls Apps Script listTabs → returns list of { name, gid, rows, cols }.
+
+**Acceptance criteria**:
+
+*   Given valid spreadsheetId, API returns all sheet names + gid + dims.
+    
+*   If invalid or no permission, return structured error { success:false, error: '...' }.
+    
+
+### B. Fetch Tab Data (preview + schema)
+
+**Deskripsi**: fetchTabData reads sampled rows (configurable), runs header detection, column analysis (type + stats), returns schema + sample.
+
+**Acceptance criteria**:
+
+*   Returns { headers, headerRowIndex, schema[], sampleValues[] }.
+    
+*   Schema includes name, index, letter, dataType:{type,confidence}, stats:{nonEmpty,sampleValues}, inputType.
+    
+
+### C. Dynamic Form Generation
+
+**Deskripsi**: Generate forms from schema with appropriate input types and validation hints.
+
+**Acceptance criteria**:
+
+*   Form maps to header names; validation rules reflect validationSuggestions.
+    
+*   Form submit performs dry-run before actual write.
+    
+
+### D. Dry-run & Confirm Write
+
+**Deskripsi**: All write operations (addRow, updateCell) support options.dryRun=true which returns preview but does NOT mutate Sheets.
+
+**Acceptance criteria**:
+
+*   Dry-run returns expected preview (row array or cell change).
+    
+*   Confirmed write performs sanitized write, creates snapshot, logs audit record.
+    
+
+### E. Regex + Schema Validation + Hidden LLM Normalizer
+
+**Deskripsi**: Payload validated first by regex + lightweight schema. If invalid, frontend OR Apps Script forwards raw to hidden LLM normalizer to produce valid JSON.
+
+**Acceptance criteria**:
+
+*   Invalid payload => 422 with details.
+    
+*   If normalizer present, Apps Script can call it and receive validated JSON or error.
+    
+
+### F. Audit Log & Snapshot
+
+**Deskripsi**: Every write logged to **AUDIT_LOG** with timestamp, author, action, target, data, result. Destructive ops create snapshot copy in Drive.
+
+**Acceptance criteria**:
+
+*   Audit rows appended with all fields.
+    
+*   Snapshot created for update/add operations (if snapshot enabled).
+    
+
+### G. Sanitization & Security
+
+**Deskripsi**: Prevent formula injection; minimal OAuth scopes; discard owner emails unless authorized.
+
+**Acceptance criteria**:
+
+*   Any value starting with = + - @ saved as '<value (prefixed with apostrophe).
+    
+*   API never returns owner emails by default.
+    
+
+6. Detailed User Flows (Step-by-Step)
+--------------------------------------
+
+### Flow 1 — Discover & Select Tab (Primary)
+
+1.  User opens app, pastes `https://docs.google.com/spreadsheets/d/<id>/` (or raw id).
+    
+2.  Frontend extracts spreadsheetId via regex `\/d\/([a-zA-Z0-9-_]+)` or raw id validation.
+    
+3.  Frontend POST `{ action:'listTabs', spreadsheetId }` to Apps Script.
+    
+4.  Apps Script opens spreadsheet via `SpreadsheetApp.openById(spreadsheetId)`, enumerates `.getSheets()`, returns list of `{ name, gid, rows, cols }`.
+    
+5.  UI displays dropdown / list; user selects tabName. (Fuzzy match optional.)
+    
+
+### Flow 2 — Preview Schema + Sample
+
+1.  Frontend POST `{ action:'fetchTabData', spreadsheetId, tabName, options:{ sampleMaxRows } }`.
+    
+2.  Apps Script samples top sampleMaxRows rows, runs `detectHeaders(values)` & `analyzeColumns(values, headers)`, returns schema + sample.
+    
+3.  UI renders schema; DynamicFormGenerator builds form.
+    
+
+### Flow 3 — Add Row (Dry-run then Commit)
+
+1.  User fills UI form and clicks submit.
+    
+2.  Frontend transforms to payload `{ action:'addRow', spreadsheetId, tabName, data: { colA: valA, ... }, options:{ dryRun:true, author } }`.
+    
+3.  Submit to Apps Script. Apps Script validates via quickValidate. If valid, simulates rowToAppend and returns preview.
+    
+4.  UI shows preview; user confirms → frontend resends `dryRun:false`.
+    
+5.  Apps Script creates snapshot, sanitizes values, performs `sheet.appendRow(row)`, writes audit log, returns success.
+    
+
+### Flow 4 — Update Cell
+
+1.  From UI (table or chat), user requests update. Frontend builds `{ action:'updateCell', spreadsheetId, tabName, range:'B5', data:{ value: '...'}, options:{ dryRun:true } }`.
+    
+2.  Dry-run preview -> confirm -> Apps Script sanitizes, `sheet.getRange(range).setValue(sanitized)`, snapshot+audit.
+    
+
+### Flow 5 — LLM-driven Action Pipeline
+
+1.  User issues natural language request via chat. Frontend sends context (spreadsheetId, tabName, sampled headers, sample rows) to Gemini.
+    
+2.  Gemini returns structured JSON (preferred). Frontend validates via regex + schema.
+    
+3.  If invalid, frontend calls Hidden LLM Normalizer middleware `/normalize` with raw Gemini output. Middleware returns validated JSON (AJV).
+    
+4.  Frontend sends final validated JSON to Apps Script. (Alternatively Apps Script can perform normalization if frontend opts out.)
+    
+
+7. API Contract (Payloads & Responses) — Concise
+-------------------------------------------------
+
+### Request: listTabs
+
+    { "action":"listTabs", "spreadsheetId":"<id>" }
+    
+
+**Response**:
+
+    { 
+      "success": true, 
+      "sheets": [
+        { "name":"Sales Data", "gid":12345, "rows":500, "cols":12 }, 
+        // ...
+      ] 
+    }
+    
+
+### Request: fetchTabData
+
+    { 
+      "action":"fetchTabData", 
+      "spreadsheetId":"<id>", 
+      "tabName":"Sales Data", 
+      "options":{ "sampleMaxRows":500 } 
+    }
+    
+
+**Response**:
+
+    { 
+      "success":true, 
+      "data": {
+        "sheetName":"Sales Data",
+        "dimensions":{ "rows":500, "cols":12, "sampledRows":100 },
+        "headers":["Month","Product","Revenue"],
+        "headerRowIndex":0,
+        "schema":[ 
+          { 
+            "name":"Month",
+            "index":0,
+            "letter":"A",
+            "dataType":{"type":"text","confidence":0.9},
+            "stats":{},
+            "inputType":"text" 
+          }, 
+          // ...
+        ],
+        "sampleValues":[
+          ["Month","Product","Revenue"],
+          ["Jan","iPhone",12000],
+          // ...
+        ] 
+      }
+    }
+    
+
+### Request: addRow (dry-run)
+
+    { 
+      "action":"addRow",
+      "spreadsheetId":"<id>",
+      "tabName":"Sales Data",
+      "data":{ "Month":"Sep","Product":"iPhone","Revenue":15000 },
+      "options":{"dryRun":true,"author":"anya@example.com"} 
+    }
+    
+
+**Response (dry-run)**:
+
+    { 
+      "success":true, 
+      "dryRun":true, 
+      "preview":["Sep","iPhone","15000"] 
+    }
+    
+
+### Request: updateCell
+
+    { 
+      "action":"updateCell",
+      "spreadsheetId":"<id>",
+      "tabName":"Config",
+      "range":"B5",
+      "data":{"value":"5000000"},
+      "options":{"dryRun":false,"author":"putra@example.com"} 
+    }
+    
+
+**Response**:
+
+    { 
+      "success":true, 
+      "result":{ "range":"B5", "newValue":"5000000" } 
+    }
+    
+
+### Error / Validation Failure
+
+    { 
+      "success": false, 
+      "error":"Validation failed", 
+      "details":[ "tabName required" ] 
+    }
+    
+
+8. Apps Script URL sebagai Intermediary — Responsibilities & Flow
+------------------------------------------------------------------
+
+### Inti Peran appsScriptUrl
+
+**Gatekeeper**: frontend only talks to Apps Script URL. Apps Script membuka spreadsheet (openById) dan mengembalikan metadata, schema, sample, dan mengeksekusi perubahan (write ops).
+
+**Router**: jika payload dari frontend gagal validasi lokal, Apps Script dapat optionally forward raw output ke Hidden LLM Parser (serverless) OR reject and instruct frontend to call normalizer.
+
+**Audit + Snapshot**: Apps Script membuat audit log, snapshots, dan menyimpan minimal telemetry.
+
+**Security boundary**: Apps Script verifies a shared secret (token) or relies on App deployment permissions to limit abuse.
+
+### Endpoint Contract (Single Endpoint doPost) — Payload Essentials
+
+All requests POST JSON to appsScriptUrl (the Web App URL). Minimal body:
+
+    {
+      "token":"<client-shared-secret>",            // optional but recommended
+      "action":"listTabs|fetchTabData|addRow|updateCell|readRange|discoverAll",
+      "spreadsheetId":"<id>",
+      "tabName":"Sales Data",      // if needed
+      "range":"B5",                // if needed
+      "data": { /* addRow or update payload */ },
+      "options": { "dryRun": true, "sampleMaxRows": 500, "author":"user@..." }
+    }
+    
+
+Responses are JSON with success boolean and structured data or error + code.
+
+**Example success**:
+
+    { "success": true, "sheets":[{"name":"Sales Data","gid":0,"rows":500,"cols":12}] }
+    
+
+**Example validation error**:
+
+    { "success": false, "error":"Validation failed", "details":[ "tabName required" ] }
+    
+
+### Security: Token Pattern & ScriptProperties
+
+Generate an API token (long random string). Store it in Apps Script ScriptProperties (via editor or deploy script).
+
+Frontend includes token in request body token. Apps Script verifies `payload.token === ScriptProperties.getProperty('API_TOKEN')`.
+
+**Why token?** Because Apps Script webapps can be open; token prevents unauthenticated abuse. (If you prefer per-user auth, you can change "Execute as" + OAuth flows later.)
+
+Set token (once) in Apps Script editor console:
+
+    PropertiesService.getScriptProperties().setProperty('API_TOKEN', 'ya7...very-long-secret');
+    PropertiesService.getScriptProperties().setProperty('HIDDEN_PARSER_URL', 'https://.../normalize');
+    
+
+### Apps Script Intermediary Sample
+
+**doPost router + token check + optional forward to hidden LLM**
+
+Paste into Code.gs (this is additive to PRD code — a compact router showing token verify + forward path):
+
+    function doPost(e) {
+      try {
+        if (!e || !e.postData || !e.postData.contents) 
+          return jsonOut({ success:false, error:'Missing body' });
+    
+        var payload = JSON.parse(e.postData.contents);
+        var props = PropertiesService.getScriptProperties();
+        var apiToken = props.getProperty('API_TOKEN');
+    
+        // Basic token verification (recommended)
+        if (!payload.token || payload.token !== apiToken) {
+          return jsonOut( { success:false, error:'Unauthorized (invalid token)' } );
+        }
+    
+        // quick validation
+        var qv = quickValidate(payload);
+        if (!qv.valid) {
+          // Option A: respond 422 so frontend can call hidden parser
+          // Option B: Apps Script can call hidden parser itself (but watch quotas/latency)
+          // We'll try to call hidden parser here if configured
+          var parserUrl = props.getProperty('HIDDEN_PARSER_URL');
+          if (parserUrl) {
+            var normalized = callHiddenParser(parserUrl, payload.raw || payload); 
+            if (normalized && normalized.ok && normalized.data) {
+              payload = normalized.data; // overwrite with normalized
+            } else {
+              return jsonOut({ 
+                success:false, 
+                error:'Validation failed', 
+                details: qv.errors, 
+                normalizeError: normalized 
+              });
+            }
+          } else {
+            return jsonOut({ success:false, error:'Validation failed', details:qv.errors });
+          }
+        }
+    
+        // route
+        var action = payload.action;
+        switch(action) {
+          case 'listTabs': return handleListTabs(payload);
+          case 'fetchTabData': return handleFetchTabData(payload);
+          case 'addRow': return handleAddRow(payload);
+          case 'updateCell': return handleUpdateCell(payload);
+          case 'readRange': return handleReadRange(payload);
+          case 'discoverAll': return handleDiscoverAll(payload);
+          default: return jsonOut({ success:false, error:'Unknown action' });
+        }
+      } catch (err) {
+        console.error('doPost fatal', err);
+        return jsonOut({ success:false, error: String(err) });
+      }
+    }
+    
+    function callHiddenParser(parserUrl, rawPayload) {
+      try {
+        var resp = UrlFetchApp.fetch(parserUrl, {
+          method: 'post',
+          contentType: 'application/json',
+          muteHttpExceptions: true,
+          payload: JSON.stringify({ raw: rawPayload })
+        });
+        return JSON.parse(resp.getContentText());
+      } catch (e) {
+        return { ok:false, error: String(e) };
+      }
+    }
+    
+    function jsonOut(obj) {
+      return ContentService.createTextOutput(JSON.stringify(obj))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    
+
+**Notes**:
+
+*   If you let Apps Script call Hidden Parser, put parser URL in ScriptProperties and protect that property.
+    
+*   **Caution**: UrlFetchApp calls consume Apps Script quotas and increase latency. Optionally prefer frontend → parser → appsScript approach.
+    
+
+### Frontend Usage Example
+
+    // appsScriptUrl saved in config
+    async function callAppsScript(payload) {
+      // don't store hidden LLM keys in client. Token is okay (rotate periodically).
+      payload.token = window.SSA_API_TOKEN; // saved in frontend env/config
+      const resp = await fetch(APPS_SCRIPT_URL, {
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return await resp.json();
+    }
+    
+    // Example: discover tabs
+    const res = await callAppsScript({ action: 'listTabs', spreadsheetId: '1uus7f…' });
+    if (res.success) renderTabs(res.sheets);
+    else showError(res.error);
+    
+
+**Security reminder**: for production, avoid hardcoding token in client. Possible options:
+
+*   Have a short-lived session token minted by a backend you control.
+    
+*   Keep Apps Script endpoint restricted to domain or internal use (deploy access control).
+    
+
+### Recommended Flow Options (Choose One)
+
+#### 1. Frontend → Apps Script → Hidden Parser (Apps Script forwards)
+
+*   **Pros**: frontend stays simple; single endpoint.
+    
+*   **Cons**: Apps Script consumes UrlFetch quotas and latency.
+    
+
+#### 2. Frontend → Hidden Parser → Apps Script (recommended for performance)
+
+*   **Pros**: parser runs serverless (fast), returns validated JSON; Apps Script executes only valid actions.
+    
+*   **Cons**: frontend needs permission to call parser (but can be protected by its own token).
+    
+
+#### 3. Hybrid
+
+Apps Script first validates; if invalid returns 422 with `needsNormalization: true` and `rawLLMOutput` field; frontend then calls parser and resends normalized payload to Apps Script.
+
+**Pick based on quotas and security preferences. For MVP, #2 is best**: keep Apps Script simple and avoid extra UrlFetch calls.
+
+9. Validation / Regex / Schema Rules (Minimum)
+-----------------------------------------------
+
+*   **spreadsheetId**: `/^[a-zA-Z0-9-_]{25,}$/` OR extracted from `/\/d\/([a-zA-Z0-9-_]+)/`.
+    
+*   **action**: enum `listTabs|fetchTabData|updateCell|addRow|readRange|discoverAll`.
+    
+*   **range**: basic A1 regex `^[A-Z]+[0-9]+(:[A-Z]+[0-9]+)?$` (allow single cell or range).
+    
+*   **data for addRow**: object keys should be subset of headers. If not, warn.
+    
+*   Use AJV (middleware) to strictly enforce before Apps Script execution (middleware side).
+    
+
+10. Security & Privacy Requirements
+------------------------------------
+
+*   **Sanitize writes**: prefix ' to values starting with = + - @.
+    
+*   **Least privilege**: avoid returning owner emails. Only return metadata necessary for UI.
+    
+*   **Audit retention**: audit logs stored in meta spreadsheet, readable by admin only.
+    
+*   **Hidden LLM keys**: keep in serverless env, never embed in frontend.
+    
+*   **Rate limits**: client-side throttle for actions; server-side lightweight lock via PropertiesService to avoid rapid conflicting writes.
+    
+
+### Error Handling & Status Codes
+
+Always return `success:false` with error + code fields. Example codes: 400 (bad request), 401 (unauthenticated), 422 (validation), 429 (rate limited), 500 (server error).
+
+Frontend shows meaningful UX: if 422 → show "Action needs normalization" and offer "Normalize now" (call parser) or show raw error details for power users.
+
+### Rate Limiting & Abuse Mitigation
+
+*   Keep a simple per-spreadsheet lock via PropertiesService to avoid write storms.
+    
+*   Optionally record last request timestamp per token and enforce minimum delta (e.g., 1s per write).
+    
+*   For heavy usage, migrate flows to server backend and use Apps Script sparingly.
+    
+
+11. Non-functional Requirements
+--------------------------------
+
+*   **Latency**: discovery (listTabs) typically <3s for medium sheets. (No SLA commitment here — measure in practice.)
+    
+*   **Scalability**: Apps Script used for MVP; heavy or background ingest not supported. Offload heavy parsing/LLM to serverless.
+    
+*   **Reliability**: every write must be auditable; snapshot creation best-effort (Drive copy may fail — still log attempt).
+    
+*   **Security**: follow OAuth scopes minimal; hidden LLM normalizer only accessible via authenticated endpoint.
+    
+
+12. Monitoring, Logging & Metrics
+----------------------------------
+
+### Telemetry Events
+
+Write to METRICS sheet: `discover_success`, `fetch_schema`, `dry_run_count`, `write_success`, `llm_normalize_attempt`, `validation_fail`.
+
+Fields: timestamp, event, spreadsheetId (hashed), user, duration_ms, extra.
+
+### Error Alerting
+
+Log to console + optionally push critical failures to webhook/email.
+
+### Telemetry / Logging at Apps Script Layer
+
+*   Log events to meta spreadsheet METRICS for api_call, action, duration, success.
+    
+*   On suspicious activity (many invalid requests), optionally email admin or post webhook.
+    
+
+13. Testing Plan (What to Test)
+--------------------------------
+
+*   **Unit tests** for header detection with fixtures: no header, header at row 2, merged header cells, numeric header.
+    
+*   **End-to-end**: paste URL → listTabs → fetchTabData → addRow dry-run → confirm addRow → verify audit & snapshot.
+    
+*   **LLM normalization**: simulate malformed JSON from LLM, ensure middleware normalizes or returns 422.
+    
+*   **Security**: attempt formula injection strings and verify sanitized write.
+    
+*   **Concurrency**: attempt rapid updates to same cell, verify lock behavior / conflict response.
+    
+
+14. Roadmap (Phases — No Time Estimates)
+-----------------------------------------
+
+### Phase Discover (MVP core)
+
+Apps Script endpoints (listTabs, fetchTabData), frontend URL sync + tab selection, dynamic form preview, dry-run addRow.
+
+### Phase Actions
+
+updateCell, sanitization, audit log + snapshot creation.
+
+### Phase Robustness
+
+hidden LLM normalizer middleware + AJV validation, telemetry, retry/backoff, optimistic locking.
+
+### Phase UX polish
+
+schema diff UI, fuzzy tab matching, recent-sync list, offline cache.
+
+### Phase Scale
+
+move heavy tasks to serverless (Cloud Functions), provide OAuth installation flow, multi-user features.
+
+15. Integration Checklist
+--------------------------
+
+### Summary Checklist to Integrate appsScriptUrl as Intermediary
+
+*   [ ] Deploy Apps Script Web App; copy appsScriptUrl.
+    
+*   [ ] Set API_TOKEN and HIDDEN_PARSER_URL in ScriptProperties.
+    
+*   [ ] Expose doPost router (use snippet above).
+    
+*   [ ] Frontend: appsScriptService.post() should call appsScriptUrl with token.
+    
+*   [ ] Hidden Parser (serverless): endpoint /normalize protected by server key.
+    
+*   [ ] Decide flow: frontend→parser→appsScript (recommended) or appsScript→parser.
+    
+*   [ ] Add UI responses for 422 (normalizer required), 401, and 429.
+    
+
+16. Risks & Mitigations
+------------------------
+
+*   **Apps Script quotas/timeouts** — mitigate: sample data, chunk writes, offload LLM/parse to serverless.
+    
+*   **LLM hallucination** — mitigate: enforce structured JSON + middleware AJV validation + dry-run preview.
+    
+*   **User error / destructive writes** — mitigate: dry-run by default, snapshot + audit.
+    
+*   **Privacy leak** — mitigate: minimal fields returned; explicit consent for exposing owner emails.
+    
+
+17. Acceptance Criteria for MVP (Summary)
+------------------------------------------
+
+*   [ ] Frontend accepts URL/ID and lists tabs by name (no gid needed).
+    
+*   [ ] Fetch tab preview returns schema + sample for selection.
+    
+*   [ ] Dynamic form generator constructs forms per schema and supports dry-run.
+    
+*   [ ] addRow and updateCell run on confirm, create audit records, sanitize inputs, and optionally create snapshot.
+    
+*   [ ] Invalid structured actions are rejected with clear errors (422). Hidden normalizer middleware can turn malformed LLM output into valid actions (optional integration).
+    
+*   [ ] Logs for key events written to meta spreadsheet.
+    
+
+Kesimpulan:  
+  
+LLM key ada dua,untuk main model, yaitu asisten untuk editing sheet, dan ada LLM untuk parser. keduanya menggunakan model gemini (pilihan model bisa dipilih, yang penting dari vendor gemini.  
+  
+APPS script menggunakan url untuk connect, dan dipakai di UI/frontend.  
+  
+  
+  
+  
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

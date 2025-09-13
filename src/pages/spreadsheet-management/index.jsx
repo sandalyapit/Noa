@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import Header from '../../components/ui/Header';
 import Breadcrumb from '../../components/ui/Breadcrumb';
 import SpreadsheetSelector from './components/SpreadsheetSelector';
 import TabSelector from './components/TabSelector';
@@ -264,8 +263,7 @@ const SpreadsheetManagement = () => {
 
   return (
     <div className="min-h-screen bg-background">
-      <Header />
-      <main className="pt-16">
+      <main>
         <div className="max-w-7xl mx-auto px-6 py-8">
           <Breadcrumb />
           
@@ -334,16 +332,27 @@ const SpreadsheetManagement = () => {
                     isProcessing={isProcessing}
                   />
 
-                  <DataTable
-                    data={mockData}
-                    headers={mockHeaders}
-                    selectedRows={selectedRows}
-                    onRowSelect={setSelectedRows}
-                    onCellEdit={handleCellEdit}
-                    onSort={handleSort}
-                    sortConfig={sortConfig}
-                    isLoading={isLoading}
-                  />
+                  <div
+                    data-context-menu={JSON.stringify({
+                      type: 'tab',
+                      id: selectedTab.id,
+                      name: selectedTab.name,
+                      spreadsheetId: selectedSpreadsheet?.id,
+                      tabName: selectedTab.name,
+                      ...selectedTab
+                    })}
+                  >
+                    <DataTable
+                      data={mockData}
+                      headers={mockHeaders}
+                      selectedRows={selectedRows}
+                      onRowSelect={setSelectedRows}
+                      onCellEdit={handleCellEdit}
+                      onSort={handleSort}
+                      sortConfig={sortConfig}
+                      isLoading={isLoading}
+                    />
+                  </div>
                 </>
               )}
 

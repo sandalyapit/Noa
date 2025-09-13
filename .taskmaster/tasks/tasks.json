@@ -1,0 +1,69 @@
+{
+  "project": "Google Sheets Assistant",
+  "version": "1.0.0",
+  "tags": {
+    "master": {
+      "tasks": [
+        {
+          "id": 1,
+          "title": "Frontend Setup & Manual URL Sync/Tab Discovery",
+          "description": "Set up the basic Frontend UI using React and Tailwind. This UI should include an input field for the user to paste a Google Sheet URL or ID. Upon submission, the frontend should call the Apps Script backend to list the available tabs in the spreadsheet and display them to the user. This corresponds to Feature A and the 'Discover' phase in the PRD.",
+          "status": "pending",
+          "priority": "high",
+          "dependencies": []
+        },
+        {
+          "id": 2,
+          "title": "Fetch Tab Data (Preview + Schema)",
+          "description": "Implement the functionality to fetch sample data from a selected tab. This includes detecting headers, analyzing columns to determine data types and other properties, and returning a schema object along with the sample data. This corresponds to Feature B in the PRD.",
+          "status": "pending",
+          "priority": "high",
+          "dependencies": [1]
+        },
+        {
+          "id": 3,
+          "title": "Dynamic Form Generation",
+          "description": "Generate forms from the schema with appropriate input types and validation hints. The form should map to header names and validation rules should reflect validationSuggestions. Form submission should perform a dry-run before the actual write. This corresponds to Feature C in the PRD.",
+          "status": "pending",
+          "priority": "medium",
+          "dependencies": [2]
+        },
+        {
+          "id": 4,
+          "title": "Dry-run & Confirm Write",
+          "description": "All write operations (addRow, updateCell) should support an options.dryRun=true parameter which returns a preview but does NOT mutate the Sheet. A confirmed write should perform a sanitized write, create a snapshot, and log an audit record. This corresponds to Feature D in the PRD.",
+          "status": "pending",
+          "priority": "high",
+          "dependencies": [3]
+        },
+        {
+          "id": 5,
+          "title": "Regex + Schema Validation + Hidden LLM Normalizer",
+          "description": "Payloads should be validated first by regex and a lightweight schema. If invalid, the frontend or Apps Script should forward the raw payload to a hidden LLM normalizer to produce valid JSON. This corresponds to Feature E in the PRD.",
+          "status": "pending",
+          "priority": "medium",
+          "dependencies": [4]
+        },
+        {
+          "id": 6,
+          "title": "Audit Log & Snapshot",
+          "description": "Every write operation should be logged to an AUDIT_LOG with a timestamp, author, action, target, data, and result. Destructive operations should create a snapshot copy in Drive. This corresponds to Feature F in the PRD.",
+          "status": "pending",
+          "priority": "high",
+          "dependencies": [4]
+        },
+        {
+          "id": 7,
+          "title": "Sanitization & Security",
+          "description": "Prevent formula injection by prefixing values starting with =, +, -, @ with an apostrophe. Use minimal OAuth scopes and do not return owner emails unless authorized. This corresponds to Feature G in the PRD.",
+          "status": "pending",
+          "priority": "high",
+          "dependencies": [4]
+        }
+      ]
+    }
+  },
+  "config": {
+    "activeTag": "master"
+  }
+}
