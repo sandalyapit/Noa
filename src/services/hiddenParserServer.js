@@ -9,7 +9,7 @@
  * - Google Cloud Functions
  */
 
-import { normalize, validate, health } from './hiddenParserImplementation.js';
+import { normalize, normalizeWithAI, validate, health } from './hiddenParserImplementation.js';
 
 /**
  * CORS headers for cross-origin requests
@@ -74,14 +74,22 @@ async function handleNormalize(request) {
       return createResponse(400, { error: 'Missing raw data' });
     }
 
-    const result = normalize(body.raw, body.options || {});
+    // Use AI-enhanced normalization if enabled, otherwise fall back to rule-based
+    const useAI = body.options?.useAI !== false; // Default to true
+    
+    let result;
+    if (useAI) {
+      result = await normalizeWithAI(body.raw, body.options || {});
+    } else {
+      result = normalize(body.raw, body.options || {});
+    }
     
     return createResponse(200, result);
   } catch (error) {
     console.error('Normalize error:', error);
     return createResponse(400, { 
       ok: false, 
-      error: 'Failed to parse request body' 
+      error: 'Failed to normalize data: ' + error.message
     });
   }
 }

@@ -2,6 +2,12 @@
  * Hidden LLM Normalizer Implementation
  * A serverless function that normalizes malformed LLM outputs into valid Apps Script payloads
  * 
+ * Features:
+ * - Gemini API integration as primary LLM
+ * - OpenRouter API as fallback LLM
+ * - Schema validation with AJV
+ * - Intelligent normalization and fixing
+ * 
  * This can be deployed to:
  * - Vercel Functions
  * - Netlify Functions  
@@ -589,15 +595,338 @@ export function validate(data, action) {
 }
 
 /**
+ * Uses AI to normalize data when rule-based normalization fails
+ * @param {Object} rawData - Raw data that failed normalization
+ * @param {string} detectedAction - The detected action
+ * @returns {Promise<Object>} AI-normalized result
+ */
+export async function aiNormalize(rawData, detectedAction) {
+  const prompt = createNormalizationPrompt(rawData, detectedAction);
+  
+  try {
+    // Try Gemini first
+    const geminiResult = await callGeminiAPI(prompt);
+    if (geminiResult.success) {
+      return {
+        ok: true,
+        data: geminiResult.data,
+        metadata: {
+          aiProvider: 'gemini',
+          confidence: geminiResult.confidence || 0.8
+        }
+      };
+    }
+  } catch (error) {
+    console.warn('Gemini API failed:', error.message);
+  }
+  
+  try {
+    // Fallback to OpenRouter
+    const openRouterResult = await callOpenRouterAPI(prompt);
+    if (openRouterResult.success) {
+      return {
+        ok: true,
+        data: openRouterResult.data,
+        metadata: {
+          aiProvider: 'openrouter',
+          confidence: openRouterResult.confidence || 0.7
+        }
+      };
+    }
+  } catch (error) {
+    console.warn('OpenRouter API failed:', error.message);
+  }
+  
+  return {
+    ok: false,
+    error: 'All AI providers failed to normalize the data'
+  };
+}
+
+/**
+ * Creates a normalization prompt for AI
+ * @param {Object} rawData - Raw data to normalize
+ * @param {string} action - Target action
+ * @returns {string} Formatted prompt
+ */
+function createNormalizationPrompt(rawData, action) {
+  const schema = schemas[action];
+  
+  return `You are a data normalizer for Google Sheets operations. Your task is to convert malformed or incomplete data into a valid JSON payload.
+
+TARGET ACTION: ${action}
+
+REQUIRED SCHEMA:
+${JSON.stringify(schema, null, 2)}
+
+RAW INPUT DATA:
+${JSON.stringify(rawData, null, 2)}
+
+INSTRUCTIONS:
+1. Convert the raw input into a valid JSON object that matches the required schema
+2. Fill in missing required fields with reasonable defaults if possible
+3. Fix any formatting issues (e.g., spreadsheet URLs to IDs, range notation)
+4. Preserve the original intent of the data
+5. Return ONLY the valid JSON object, no explanations
+
+EXAMPLE TRANSFORMATIONS:
+- "https://docs.google.com/spreadsheets/d/1ABC123/edit" → "1ABC123"
+- "Sheet1" → "Sheet1" (keep as is)
+- "A1" → "A1" (keep as is)
+- "update cell A1 to hello" → {"action": "updateCell", "range": "A1", "data": {"value": "hello"}}
+
+OUTPUT (valid JSON only):`;
+}
+
+/**
+ * Calls Gemini API for normalization
+ * @param {string} prompt - Normalization prompt
+ * @returns {Promise<Object>} Gemini API result
+ */
+async function callGeminiAPI(prompt) {
+  const apiKey = process.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('Gemini API key not configured');
+  }
+  
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contents: [{
+        parts: [{
+          text: prompt
+        }]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        topK: 1,
+        topP: 0.8,
+        maxOutputTokens: 1024,
+      },
+      safetySettings: [
+        {
+          category: "HARM_CATEGORY_HARASSMENT",
+          threshold: "BLOCK_MEDIUM_AND_ABOVE"
+        },
+        {
+          category: "HARM_CATEGORY_HATE_SPEECH",
+          threshold: "BLOCK_MEDIUM_AND_ABOVE"
+        },
+        {
+          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          threshold: "BLOCK_MEDIUM_AND_ABOVE"
+        },
+        {
+          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+          threshold: "BLOCK_MEDIUM_AND_ABOVE"
+        }
+      ]
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Gemini API error: ${response.status}`);
+  }
+  
+  const result = await response.json();
+  
+  if (!result.candidates || !result.candidates[0] || !result.candidates[0].content) {
+    throw new Error('Invalid Gemini API response');
+  }
+  
+  const text = result.candidates[0].content.parts[0].text;
+  
+  try {
+    // Extract JSON from the response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON found in Gemini response');
+    }
+    
+    const parsedData = JSON.parse(jsonMatch[0]);
+    
+    return {
+      success: true,
+      data: parsedData,
+      confidence: 0.8
+    };
+  } catch (parseError) {
+    throw new Error(`Failed to parse Gemini response: ${parseError.message}`);
+  }
+}
+
+/**
+ * Calls OpenRouter API for normalization
+ * @param {string} prompt - Normalization prompt
+ * @returns {Promise<Object>} OpenRouter API result
+ */
+async function callOpenRouterAPI(prompt) {
+  const apiKey = process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('OpenRouter API key not configured');
+  }
+  
+  // Get available models from OpenRouter
+  const modelsResponse = await fetch('https://openrouter.ai/api/v1/models', {
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+    }
+  });
+  
+  let selectedModel = 'anthropic/claude-3-haiku'; // Default fallback
+  
+  if (modelsResponse.ok) {
+    const models = await modelsResponse.json();
+    // Prefer fast, cheap models for normalization
+    const preferredModels = [
+      'anthropic/claude-3-haiku',
+      'openai/gpt-3.5-turbo',
+      'meta-llama/llama-3-8b-instruct',
+      'mistralai/mistral-7b-instruct'
+    ];
+    
+    for (const preferred of preferredModels) {
+      if (models.data.some(model => model.id === preferred)) {
+        selectedModel = preferred;
+        break;
+      }
+    }
+  }
+  
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://smart-spreadsheet-assistant.com',
+      'X-Title': 'Smart Spreadsheet Assistant'
+    },
+    body: JSON.stringify({
+      model: selectedModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a precise data normalizer. Return only valid JSON objects that match the given schema. No explanations, no markdown formatting, just pure JSON.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.1,
+      max_tokens: 1024,
+      top_p: 0.8
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`OpenRouter API error: ${response.status}`);
+  }
+  
+  const result = await response.json();
+  
+  if (!result.choices || !result.choices[0] || !result.choices[0].message) {
+    throw new Error('Invalid OpenRouter API response');
+  }
+  
+  const text = result.choices[0].message.content;
+  
+  try {
+    // Extract JSON from the response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON found in OpenRouter response');
+    }
+    
+    const parsedData = JSON.parse(jsonMatch[0]);
+    
+    return {
+      success: true,
+      data: parsedData,
+      confidence: 0.7,
+      model: selectedModel
+    };
+  } catch (parseError) {
+    throw new Error(`Failed to parse OpenRouter response: ${parseError.message}`);
+  }
+}
+
+/**
+ * Enhanced normalize function with AI fallback
+ * @param {Object} rawData - Raw data from LLM or user input
+ * @param {Object} options - Normalization options
+ * @returns {Promise<Object>} Normalized result
+ */
+export async function normalizeWithAI(rawData, options = {}) {
+  // First try rule-based normalization
+  const ruleBasedResult = normalize(rawData, options);
+  
+  if (ruleBasedResult.ok) {
+    return ruleBasedResult;
+  }
+  
+  // If rule-based fails, try AI normalization
+  const detectedAction = detectAction(cleanupRawData(rawData));
+  if (!detectedAction) {
+    return ruleBasedResult; // Return original error if no action detected
+  }
+  
+  try {
+    const aiResult = await aiNormalize(rawData, detectedAction);
+    
+    if (aiResult.ok) {
+      // Validate AI result against schema
+      const validator = validators[detectedAction];
+      if (validator && validator(aiResult.data)) {
+        return {
+          ok: true,
+          data: aiResult.data,
+          metadata: {
+            ...aiResult.metadata,
+            normalizedBy: 'ai',
+            originalError: ruleBasedResult.error
+          }
+        };
+      } else {
+        return {
+          ok: false,
+          error: 'AI normalization produced invalid data',
+          details: validator ? validator.errors : ['No validator available'],
+          aiAttempted: true
+        };
+      }
+    }
+    
+    return aiResult;
+  } catch (error) {
+    return {
+      ok: false,
+      error: `AI normalization failed: ${error.message}`,
+      originalError: ruleBasedResult.error,
+      aiAttempted: true
+    };
+  }
+}
+
+/**
  * Health check function
  * @returns {Object} Health status
  */
 export function health() {
   return {
     healthy: true,
-    version: '1.0.0',
-    uptime: process.uptime(),
+    version: '2.0.0',
+    uptime: process.uptime ? process.uptime() : 0,
     timestamp: new Date().toISOString(),
+    features: {
+      ruleBasedNormalization: true,
+      aiNormalization: true,
+      geminiAPI: !!process.env.VITE_GEMINI_API_KEY || !!process.env.GEMINI_API_KEY,
+      openRouterAPI: !!process.env.VITE_OPENROUTER_API_KEY || !!process.env.OPENROUTER_API_KEY
+    },
     schemas: Object.keys(schemas)
   };
 }

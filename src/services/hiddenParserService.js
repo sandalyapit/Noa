@@ -1,420 +1,427 @@
 /**
- * Hidden Parser Service for Smart Spreadsheet Assistant
- * Handles data normalization and validation for Apps Script integration
- * This service acts as an intermediary to normalize raw LLM output into structured data
+ * Hidden Parser Service
+ * Fourth layer of guardrail - uses external LLM service for fallback parsing
+ * This can be a separate microservice or use OpenRouter as backup
  */
-export default class HiddenParserService {
-  constructor(url, apiKey = null) {
-    this.url = url;
-    this.apiKey = apiKey;
-    this.timeout = 15000; // 15 second timeout for parser
-    this.retryAttempts = 2;
-    this.retryDelay = 500; // 500ms
+class HiddenParserService {
+  constructor(configService, openRouterService = null) {
+    this.configService = configService;
+    this.openRouterService = openRouterService;
   }
 
   /**
-   * Sets the API key for authentication
-   * @param {string} apiKey - The API key
+   * Attempts to parse raw AI output using hidden parser service
+   * @param {string} rawOutput - Raw AI output that failed other validations
+   * @param {Object} context - Context about the original request
+   * @returns {Promise<Object>} Parsing result
    */
-  setApiKey(apiKey) {
-    this.apiKey = apiKey;
-  }
+  async parse(rawOutput, context = {}) {
+    const result = {
+      success: false,
+      source: null,
+      json: null,
+      error: null,
+      attempts: []
+    };
 
-  /**
-   * Normalizes raw LLM output into structured Apps Script payload
-   * @param {Object} rawData - Raw data from LLM or user input
-   * @param {Object} options - Additional options
-   * @returns {Promise<Object>} Normalized payload
-   */
-  async normalize(rawData, options = {}) {
-    const { retryCount = 0 } = options;
-    
-    try {
-      const payload = {
-        raw: rawData,
-        options: {
-          strictValidation: options.strictValidation || false,
-          targetSchema: options.targetSchema || null,
-          context: options.context || null,
-          timestamp: Date.now()
+    // Try external hidden parser service first
+    if (this.hasExternalParser()) {
+      try {
+        const externalResult = await this.parseWithExternalService(rawOutput, context);
+        result.attempts.push({
+          method: 'external',
+          success: externalResult.success,
+          error: externalResult.error
+        });
+
+        if (externalResult.success) {
+          result.success = true;
+          result.source = 'external';
+          result.json = externalResult.json;
+          return result;
         }
-      };
-
-      // Add API key to headers if available
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      if (this.apiKey) {
-        headers['Authorization'] = `Bearer ${this.apiKey}`;
+      } catch (error) {
+        result.attempts.push({
+          method: 'external',
+          success: false,
+          error: error.message
+        });
       }
+    }
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), this.timeout);
-      
-      const response = await fetch(`${this.url}/normalize`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller?.signal
+    // Fallback to OpenRouter if available
+    if (this.openRouterService) {
+      try {
+        const openRouterResult = await this.parseWithOpenRouter(rawOutput, context);
+        result.attempts.push({
+          method: 'openrouter',
+          success: openRouterResult.success,
+          error: openRouterResult.error
+        });
+
+        if (openRouterResult.success) {
+          result.success = true;
+          result.source = 'openrouter';
+          result.json = openRouterResult.json;
+          return result;
+        }
+      } catch (error) {
+        result.attempts.push({
+          method: 'openrouter',
+          success: false,
+          error: error.message
+        });
+      }
+    }
+
+    // Final fallback: rule-based parsing
+    try {
+      const ruleBasedResult = this.parseWithRules(rawOutput, context);
+      result.attempts.push({
+        method: 'rules',
+        success: ruleBasedResult.success,
+        error: ruleBasedResult.error
       });
-      
+
+      if (ruleBasedResult.success) {
+        result.success = true;
+        result.source = 'rules';
+        result.json = ruleBasedResult.json;
+        return result;
+      }
+    } catch (error) {
+      result.attempts.push({
+        method: 'rules',
+        success: false,
+        error: error.message
+      });
+    }
+
+    result.error = 'All parsing methods failed';
+    return result;
+  }
+
+  /**
+   * Checks if external parser service is configured
+   * @returns {boolean} Whether external parser is available
+   */
+  hasExternalParser() {
+    const config = this.configService.getConfig();
+    return !!(config.hiddenParser?.url && config.hiddenParser?.apiKey);
+  }
+
+  /**
+   * Parses using external hidden parser service
+   * @param {string} rawOutput - Raw AI output
+   * @param {Object} context - Request context
+   * @returns {Promise<Object>} Parsing result
+   */
+  async parseWithExternalService(rawOutput, context) {
+    const config = this.configService.getConfig();
+    const { url, apiKey, timeout = 15000 } = config.hiddenParser;
+
+    const requestBody = {
+      raw: rawOutput,
+      context: context,
+      target: 'spreadsheet_assistant',
+      version: '1.0'
+    };
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+      const response = await fetch(`${url}/parse`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'User-Agent': 'Smart-Spreadsheet-Assistant/1.0'
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+
       clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Parser error! status: ${response.status}`);
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(`External parser error: ${response.status} - ${errorData.message || response.statusText}`);
       }
-      
-      const result = await response?.json();
-      
-      if (!result?.ok) {
-        throw new Error(result?.error || 'Normalization failed');
+
+      const data = await response.json();
+
+      if (data.success && data.parsed) {
+        return {
+          success: true,
+          json: data.parsed,
+          confidence: data.confidence || 0,
+          method: data.method || 'unknown'
+        };
+      } else {
+        return {
+          success: false,
+          error: data.error || 'External parser returned no result'
+        };
       }
+
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error('External parser request timed out');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Parses using OpenRouter as fallback
+   * @param {string} rawOutput - Raw AI output
+   * @param {Object} context - Request context
+   * @returns {Promise<Object>} Parsing result
+   */
+  async parseWithOpenRouter(rawOutput, context) {
+    if (!this.openRouterService) {
+      return {
+        success: false,
+        error: 'OpenRouter service not available'
+      };
+    }
+
+    return await this.openRouterService.parseToJson(rawOutput, context);
+  }
+
+  /**
+   * Rule-based parsing as final fallback
+   * @param {string} rawOutput - Raw AI output
+   * @param {Object} context - Request context
+   * @returns {Object} Parsing result
+   */
+  parseWithRules(rawOutput, context) {
+    try {
+      // Extract intent from natural language
+      const intent = this.extractIntent(rawOutput);
       
+      if (!intent.action) {
+        return {
+          success: false,
+          error: 'Could not determine action from output'
+        };
+      }
+
+      // Build JSON based on intent
+      const json = this.buildJsonFromIntent(intent, context);
+
       return {
         success: true,
-        data: result.data,
-        metadata: result.metadata || {},
-        warnings: result.warnings || []
+        json: json,
+        confidence: intent.confidence
       };
+
     } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Parser timeout');
-      }
-      
-      // Retry logic for network errors
-      if (retryCount < this.retryAttempts && this.isRetryableError(error)) {
-        await this.delay(this.retryDelay * (retryCount + 1));
-        return this.normalize(rawData, { ...options, retryCount: retryCount + 1 });
-      }
-      
-      console.error('Hidden parser request failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Validates data structure without normalization
-   * @param {Object} data - Data to validate
-   * @param {Object} schema - Expected schema
-   * @returns {Promise<Object>} Validation result
-   */
-  async validate(data, schema = null) {
-    try {
-      const payload = {
-        data,
-        schema,
-        validateOnly: true
-      };
-
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      if (this.apiKey) {
-        headers['Authorization'] = `Bearer ${this.apiKey}`;
-      }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), this.timeout);
-      
-      const response = await fetch(`${this.url}/validate`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller?.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Validation error! status: ${response.status}`);
-      }
-      
-      const result = await response?.json();
-      
       return {
-        valid: result.valid || false,
-        errors: result.errors || [],
-        warnings: result.warnings || [],
-        suggestions: result.suggestions || []
+        success: false,
+        error: `Rule-based parsing failed: ${error.message}`
       };
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Validation timeout');
-      }
-      
-      console.error('Validation request failed:', error);
-      throw error;
     }
   }
 
   /**
-   * Extracts structured data from natural language text
-   * @param {string} text - Natural language text
-   * @param {Object} context - Context information
-   * @returns {Promise<Object>} Extracted structured data
+   * Extracts intent from natural language
+   * @param {string} text - Input text
+   * @returns {Object} Extracted intent
    */
-  async extractStructuredData(text, context = {}) {
-    try {
-      const payload = {
-        text,
-        context: {
-          spreadsheetId: context.spreadsheetId || null,
-          tabName: context.tabName || null,
-          headers: context.headers || [],
-          sampleData: context.sampleData || [],
-          ...context
+  extractIntent(text) {
+    const intent = {
+      action: null,
+      spreadsheetId: null,
+      tabName: null,
+      range: null,
+      data: null,
+      confidence: 0
+    };
+
+    const lowerText = text.toLowerCase();
+
+    // Action detection
+    const actionPatterns = {
+      listTabs: /list\s+(tabs|sheets)|get\s+(tabs|sheets)|show\s+(tabs|sheets)/i,
+      fetchTabData: /fetch\s+data|get\s+data|read\s+data|show\s+data/i,
+      updateCell: /update\s+cell|set\s+cell|change\s+cell|modify\s+cell/i,
+      addRow: /add\s+row|insert\s+row|append\s+row|new\s+row/i,
+      readRange: /read\s+range|get\s+range|fetch\s+range/i,
+      discoverAll: /discover|find\s+spreadsheets|list\s+spreadsheets/i,
+      health: /health|status|ping|test/i
+    };
+
+    for (const [action, pattern] of Object.entries(actionPatterns)) {
+      if (pattern.test(text)) {
+        intent.action = action;
+        intent.confidence += 0.3;
+        break;
+      }
+    }
+
+    // Spreadsheet ID detection
+    const spreadsheetIdMatch = text.match(/[a-zA-Z0-9-_]{44}/);
+    if (spreadsheetIdMatch) {
+      intent.spreadsheetId = spreadsheetIdMatch[0];
+      intent.confidence += 0.2;
+    }
+
+    // Tab name detection
+    const tabNameMatch = text.match(/(?:tab|sheet)\s+["']?([^"'\s]+)["']?/i);
+    if (tabNameMatch) {
+      intent.tabName = tabNameMatch[1];
+      intent.confidence += 0.2;
+    }
+
+    // Range detection
+    const rangeMatch = text.match(/[A-Z]+[0-9]+(?::[A-Z]+[0-9]+)?/);
+    if (rangeMatch) {
+      intent.range = rangeMatch[0];
+      intent.confidence += 0.2;
+    }
+
+    // Value detection for updates
+    const valueMatch = text.match(/(?:to|with|value)\s+["']?([^"'\n]+)["']?/i);
+    if (valueMatch && intent.action === 'updateCell') {
+      intent.data = { value: valueMatch[1].trim() };
+      intent.confidence += 0.1;
+    }
+
+    return intent;
+  }
+
+  /**
+   * Builds JSON object from extracted intent
+   * @param {Object} intent - Extracted intent
+   * @param {Object} context - Request context
+   * @returns {Object} JSON object
+   */
+  buildJsonFromIntent(intent, context) {
+    const json = {
+      action: intent.action
+    };
+
+    // Add required fields based on action
+    switch (intent.action) {
+      case 'listTabs':
+        if (intent.spreadsheetId || context.spreadsheetId) {
+          json.spreadsheetId = intent.spreadsheetId || context.spreadsheetId;
+        } else {
+          throw new Error('SpreadsheetId required for listTabs');
         }
-      };
+        break;
 
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      if (this.apiKey) {
-        headers['Authorization'] = `Bearer ${this.apiKey}`;
-      }
+      case 'fetchTabData':
+        if (intent.spreadsheetId || context.spreadsheetId) {
+          json.spreadsheetId = intent.spreadsheetId || context.spreadsheetId;
+        } else {
+          throw new Error('SpreadsheetId required for fetchTabData');
+        }
+        
+        if (intent.tabName || context.tabName) {
+          json.tabName = intent.tabName || context.tabName;
+        } else {
+          throw new Error('TabName required for fetchTabData');
+        }
+        break;
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), this.timeout);
-      
-      const response = await fetch(`${this.url}/extract`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller?.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Extraction error! status: ${response.status}`);
-      }
-      
-      const result = await response?.json();
-      
-      return {
-        success: result.success || false,
-        data: result.data || null,
-        confidence: result.confidence || 0,
-        alternatives: result.alternatives || [],
-        metadata: result.metadata || {}
-      };
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Extraction timeout');
-      }
-      
-      console.error('Extraction request failed:', error);
-      throw error;
+      case 'updateCell':
+        if (intent.spreadsheetId || context.spreadsheetId) {
+          json.spreadsheetId = intent.spreadsheetId || context.spreadsheetId;
+        } else {
+          throw new Error('SpreadsheetId required for updateCell');
+        }
+        
+        if (intent.tabName || context.tabName) {
+          json.tabName = intent.tabName || context.tabName;
+        } else {
+          throw new Error('TabName required for updateCell');
+        }
+        
+        if (intent.range) {
+          json.range = intent.range;
+        } else {
+          throw new Error('Range required for updateCell');
+        }
+        
+        if (intent.data) {
+          json.data = intent.data;
+        } else {
+          throw new Error('Data required for updateCell');
+        }
+        break;
+
+      case 'addRow':
+        if (intent.spreadsheetId || context.spreadsheetId) {
+          json.spreadsheetId = intent.spreadsheetId || context.spreadsheetId;
+        } else {
+          throw new Error('SpreadsheetId required for addRow');
+        }
+        
+        if (intent.tabName || context.tabName) {
+          json.tabName = intent.tabName || context.tabName;
+        } else {
+          throw new Error('TabName required for addRow');
+        }
+        
+        // Default empty row data if not specified
+        json.data = intent.data || [];
+        break;
+
+      case 'readRange':
+        if (intent.spreadsheetId || context.spreadsheetId) {
+          json.spreadsheetId = intent.spreadsheetId || context.spreadsheetId;
+        } else {
+          throw new Error('SpreadsheetId required for readRange');
+        }
+        
+        if (intent.tabName || context.tabName) {
+          json.tabName = intent.tabName || context.tabName;
+        } else {
+          throw new Error('TabName required for readRange');
+        }
+        
+        if (intent.range) {
+          json.range = intent.range;
+        } else {
+          throw new Error('Range required for readRange');
+        }
+        break;
+
+      case 'discoverAll':
+      case 'health':
+        // No additional fields required
+        break;
     }
+
+    return json;
   }
 
   /**
-   * Converts Apps Script action to natural language description
-   * @param {Object} action - Apps Script action object
-   * @returns {Promise<Object>} Natural language description
+   * Gets service status
+   * @returns {Object} Service status
    */
-  async actionToText(action) {
-    try {
-      const payload = { action };
-
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      if (this.apiKey) {
-        headers['Authorization'] = `Bearer ${this.apiKey}`;
-      }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), this.timeout);
-      
-      const response = await fetch(`${this.url}/describe`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller?.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Description error! status: ${response.status}`);
-      }
-      
-      const result = await response?.json();
-      
-      return {
-        description: result.description || 'Unknown action',
-        details: result.details || [],
-        risks: result.risks || [],
-        suggestions: result.suggestions || []
-      };
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Description timeout');
-      }
-      
-      console.error('Description request failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Gets the health status of the parser service
-   * @returns {Promise<Object>} Health status
-   */
-  async getHealthStatus() {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), 5000); // 5 second timeout for health check
-      
-      const response = await fetch(`${this.url}/health`, {
-        method: 'GET',
-        signal: controller?.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Health check failed! status: ${response.status}`);
-      }
-      
-      const result = await response?.json();
-      
-      return {
-        healthy: result.healthy || false,
-        version: result.version || 'unknown',
-        uptime: result.uptime || 0,
-        lastCheck: Date.now()
-      };
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Health check timeout');
-      }
-      
-      console.error('Health check failed:', error);
-      return {
-        healthy: false,
-        error: error.message,
-        lastCheck: Date.now()
-      };
-    }
-  }
-
-  /**
-   * Checks if an error is retryable
-   * @param {Error} error - The error to check
-   * @returns {boolean} Whether the error is retryable
-   */
-  isRetryableError(error) {
-    const retryableErrors = [
-      'NetworkError',
-      'TypeError', // Often network-related
-      'Failed to fetch',
-      'timeout'
-    ];
+  getStatus() {
+    const config = this.configService.getConfig();
     
-    return retryableErrors.some(errorType => 
-      error?.name === errorType || error?.message?.toLowerCase()?.includes(errorType.toLowerCase())
-    );
-  }
-
-  /**
-   * Delays execution for the specified time
-   * @param {number} ms - Milliseconds to delay
-   * @returns {Promise} Promise that resolves after the delay
-   */
-  delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Creates a batch normalization request
-   * @param {Array} rawDataArray - Array of raw data objects
-   * @param {Object} options - Additional options
-   * @returns {Promise<Object>} Batch normalization results
-   */
-  async batchNormalize(rawDataArray, options = {}) {
-    try {
-      const payload = {
-        batch: rawDataArray,
-        options: {
-          strictValidation: options.strictValidation || false,
-          targetSchema: options.targetSchema || null,
-          context: options.context || null,
-          timestamp: Date.now()
-        }
-      };
-
-      const headers = {
-        'Content-Type': 'application/json'
-      };
-      
-      if (this.apiKey) {
-        headers['Authorization'] = `Bearer ${this.apiKey}`;
+    return {
+      externalParser: {
+        configured: this.hasExternalParser(),
+        url: config.hiddenParser?.url || null,
+        timeout: config.hiddenParser?.timeout || 15000
+      },
+      openRouterFallback: {
+        available: !!this.openRouterService,
+        configured: this.openRouterService ? this.openRouterService.getStatus().configured : false
+      },
+      ruleBasedFallback: {
+        available: true,
+        confidence: 'low'
       }
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller?.abort(), this.timeout * 2); // Double timeout for batch
-      
-      const response = await fetch(`${this.url}/batch-normalize`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: controller?.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response?.ok) {
-        throw new Error(`Batch normalization error! status: ${response.status}`);
-      }
-      
-      const result = await response?.json();
-      
-      return {
-        success: result.success || false,
-        results: result.results || [],
-        errors: result.errors || [],
-        metadata: result.metadata || {}
-      };
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error('Batch normalization timeout');
-      }
-      
-      console.error('Batch normalization failed:', error);
-      throw error;
-    }
+    };
   }
 }
 
-// Create singleton instance
-let hiddenParserService = null;
-
-/**
- * Factory function to create or get the hidden parser service instance
- * @param {string} url - Parser service URL
- * @param {string} apiKey - API key for authentication
- * @returns {HiddenParserService} Service instance
- */
-export function createHiddenParserService(url, apiKey = null) {
-  if (!hiddenParserService || hiddenParserService.url !== url) {
-    hiddenParserService = new HiddenParserService(url, apiKey);
-  } else if (apiKey && hiddenParserService.apiKey !== apiKey) {
-    hiddenParserService.setApiKey(apiKey);
-  }
-  
-  return hiddenParserService;
-}
-
-/**
- * Gets the current hidden parser service instance
- * @returns {HiddenParserService|null} Service instance or null if not initialized
- */
-export function getHiddenParserService() {
-  return hiddenParserService;
-}
+export default HiddenParserService;

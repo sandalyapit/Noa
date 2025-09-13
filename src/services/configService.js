@@ -22,6 +22,12 @@ class ConfigService {
         model: 'gemini-1.5-flash',
         temperature: 0.7
       },
+      openRouter: {
+        apiKey: null,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        timeout: 30000,
+        retryAttempts: 2
+      },
       ui: {
         theme: 'light',
         language: 'en',
@@ -79,8 +85,13 @@ class ConfigService {
     }
 
     // Gemini configuration
-    if (import.meta.env.VITE_GOOGLE_API_KEY) {
-      this.config.gemini.apiKey = import.meta.env.VITE_GOOGLE_API_KEY;
+    if (import.meta.env.VITE_GEMINI_API_KEY) {
+      this.config.gemini.apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    }
+
+    // OpenRouter configuration
+    if (import.meta.env.VITE_OPENROUTER_API_KEY) {
+      this.config.openRouter.apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
     }
   }
 
@@ -102,6 +113,10 @@ class ConfigService {
         },
         gemini: {
           ...this.config.gemini,
+          apiKey: null // Don't persist API key
+        },
+        openRouter: {
+          ...this.config.openRouter,
           apiKey: null // Don't persist API key
         }
       };
@@ -190,6 +205,23 @@ class ConfigService {
   }
 
   /**
+   * Gets OpenRouter configuration
+   * @returns {Object} OpenRouter config
+   */
+  getOpenRouterConfig() {
+    return { ...this.config.openRouter };
+  }
+
+  /**
+   * Sets OpenRouter API key
+   * @param {string} apiKey - OpenRouter API key
+   */
+  setOpenRouterApiKey(apiKey) {
+    this.config.openRouter.apiKey = apiKey;
+    // Don't save API key to storage for security
+  }
+
+  /**
    * Gets UI configuration
    * @returns {Object} UI config
    */
@@ -252,6 +284,11 @@ class ConfigService {
       warnings.push('Gemini API key is not set - AI features may not work');
     }
 
+    // Check OpenRouter configuration
+    if (!this.config.openRouter.apiKey) {
+      warnings.push('OpenRouter API key is not set - fallback models disabled');
+    }
+
     return {
       valid: errors.length === 0,
       errors,
@@ -295,6 +332,12 @@ class ConfigService {
         model: 'gemini-1.5-flash',
         temperature: 0.7
       },
+      openRouter: {
+        apiKey: null,
+        baseUrl: 'https://openrouter.ai/api/v1',
+        timeout: 30000,
+        retryAttempts: 2
+      },
       ui: {
         theme: 'light',
         language: 'en',
@@ -331,6 +374,11 @@ class ConfigService {
       gemini: {
         model: this.config.gemini.model,
         temperature: this.config.gemini.temperature
+      },
+      openRouter: {
+        baseUrl: this.config.openRouter.baseUrl,
+        timeout: this.config.openRouter.timeout,
+        retryAttempts: this.config.openRouter.retryAttempts
       },
       ui: { ...this.config.ui },
       security: { ...this.config.security }

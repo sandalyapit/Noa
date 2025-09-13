@@ -4,6 +4,7 @@ import ScrollToTop from "components/ScrollToTop";
 import ErrorBoundary from "components/ErrorBoundary";
 import MainLayout from "components/MainLayout";
 import IntegratedDemo from "components/IntegratedDemo";
+import ServiceDebugger from "components/ServiceDebugger";
 import NotFound from "pages/NotFound";
 import Dashboard from './pages/dashboard';
 import SpreadsheetManagement from './pages/spreadsheet-management';
@@ -22,6 +23,7 @@ const Routes = () => {
             <Route path="/spreadsheet-management" element={<SpreadsheetManagement />} />
             <Route path="/connect-spreadsheet" element={<ConnectSpreadsheet />} />
             <Route path="/demo" element={<IntegratedDemo />} />
+            <Route path="/debug" element={<ServiceDebugger />} />
             <Route path="*" element={<NotFound />} />
           </RouterRoutes>
         </MainLayout>

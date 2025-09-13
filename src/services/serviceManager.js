@@ -1,459 +1,476 @@
 /**
- * Service Manager for Smart Spreadsheet Assistant
- * Orchestrates all services and handles integration between Apps Script, Hidden Parser, and Gemini
+ * Service Manager
+ * Orchestrates all guardrail layers and services according to the defined flow:
+ * 1. User Action → Agent AI
+ * 2. Regex Check → Normalizer → Schema Validator → Hidden Parser
+ * 3. Apps Script Execution
  */
+
+import ConfigService from './configService.js';
+import RegexCheckService from './regexCheckService.js';
+import NormalizerService from './normalizerService.js';
+import SchemaValidatorService from './schemaValidatorService.js';
+import OpenRouterService from './openRouterService.js';
+import HiddenParserService from './hiddenParserService.js';
+import GeminiService from './geminiService.js';
 import AppsScriptService from './appsScriptService.js';
-import { createHiddenParserService } from './hiddenParserService.js';
-import geminiService from './geminiService.js';
-import configService from './configService.js';
 
 class ServiceManager {
   constructor() {
-    this.services = {
-      appsScript: null,
-      hiddenParser: null,
-      gemini: geminiService,
-      config: configService
-    };
-
-    this.initialized = false;
-    this.initializationPromise = null;
+    // Initialize core services
+    this.configService = new ConfigService();
+    
+    // Initialize guardrail services
+    this.regexCheckService = new RegexCheckService();
+    this.normalizerService = new NormalizerService();
+    this.schemaValidatorService = new SchemaValidatorService();
+    
+    // Initialize AI services
+    this.geminiService = new GeminiService(this.configService);
+    this.openRouterService = new OpenRouterService(this.configService);
+    this.hiddenParserService = new HiddenParserService(this.configService, this.openRouterService);
+    
+    // Initialize Apps Script service
+    this.appsScriptService = new AppsScriptService(this.configService);
+    
+    this.isInitialized = false;
   }
 
   /**
-   * Initializes all services based on configuration
+   * Initializes all services
    * @returns {Promise<Object>} Initialization result
    */
   async initialize() {
-    if (this.initialized) {
-      return { success: true, message: 'Services already initialized' };
-    }
-
-    if (this.initializationPromise) {
-      return this.initializationPromise;
-    }
-
-    this.initializationPromise = this._performInitialization();
-    return this.initializationPromise;
-  }
-
-  /**
-   * Performs the actual initialization
-   * @private
-   */
-  async _performInitialization() {
     try {
-      const config = this.services.config.getServiceInitConfig();
-      const errors = [];
-      const warnings = [];
-
-      // Initialize Apps Script service
-      if (config.appsScript.url) {
-        this.services.appsScript = new AppsScriptService(
-          config.appsScript.url,
-          config.appsScript.token,
-          config.appsScript.hiddenParserUrl
-        );
-        
-        // Test Apps Script connection
-        try {
-          await this.services.appsScript.getHealthStatus();
-        } catch (error) {
-          warnings.push(`Apps Script service may not be available: ${error.message}`);
-        }
-      } else {
-        errors.push('Apps Script URL not configured');
+      console.log('🚀 Initializing Service Manager...');
+      
+      // Validate configuration
+      const configValidation = this.configService.validateConfig();
+      if (!configValidation.valid) {
+        console.warn('⚠️ Configuration issues detected:', configValidation.errors);
       }
 
-      // Initialize Hidden Parser service
-      if (config.hiddenParser.url) {
-        this.services.hiddenParser = createHiddenParserService(
-          config.hiddenParser.url,
-          config.hiddenParser.apiKey
-        );
-        
-        // Test Hidden Parser connection
-        try {
-          const health = await this.services.hiddenParser.getHealthStatus();
-          if (!health.healthy) {
-            warnings.push('Hidden Parser service is not healthy');
-          }
-        } catch (error) {
-          warnings.push(`Hidden Parser service may not be available: ${error.message}`);
-        }
-      } else {
-        warnings.push('Hidden Parser URL not configured - normalization features disabled');
-      }
-
-      // Gemini service is already initialized as singleton
-      if (!config.gemini.apiKey) {
-        warnings.push('Gemini API key not configured - AI features may not work');
-      }
-
-      this.initialized = true;
-
-      return {
-        success: errors.length === 0,
-        errors,
-        warnings,
-        services: {
-          appsScript: !!this.services.appsScript,
-          hiddenParser: !!this.services.hiddenParser,
-          gemini: !!this.services.gemini,
-          config: !!this.services.config
-        }
-      };
-    } catch (error) {
-      console.error('Service initialization failed:', error);
-      return {
-        success: false,
-        errors: [`Initialization failed: ${error.message}`],
-        warnings: []
-      };
-    }
-  }
-
-  /**
-   * Gets a specific service instance
-   * @param {string} serviceName - Name of the service
-   * @returns {Object|null} Service instance
-   */
-  getService(serviceName) {
-    if (!this.initialized) {
-      console.warn('Services not initialized. Call initialize() first.');
-      return null;
-    }
-
-    return this.services[serviceName] || null;
-  }
-
-  /**
-   * Gets the Apps Script service
-   * @returns {AppsScriptService|null} Apps Script service instance
-   */
-  getAppsScriptService() {
-    return this.getService('appsScript');
-  }
-
-  /**
-   * Gets the Hidden Parser service
-   * @returns {HiddenParserService|null} Hidden Parser service instance
-   */
-  getHiddenParserService() {
-    return this.getService('hiddenParser');
-  }
-
-  /**
-   * Gets the Gemini service
-   * @returns {GeminiService} Gemini service instance
-   */
-  getGeminiService() {
-    return this.getService('gemini');
-  }
-
-  /**
-   * Gets the Config service
-   * @returns {ConfigService} Config service instance
-   */
-  getConfigService() {
-    return this.getService('config');
-  }
-
-  /**
-   * Processes a user instruction with AI assistance and normalization
-   * @param {string} instruction - User's natural language instruction
-   * @param {Object} context - Current context (spreadsheet, tab, etc.)
-   * @returns {Promise<Object>} Processed instruction result
-   */
-  async processUserInstruction(instruction, context = {}) {
-    try {
-      if (!this.initialized) {
-        await this.initialize();
-      }
-
-      const gemini = this.getGeminiService();
-      const hiddenParser = this.getHiddenParserService();
-      const appsScript = this.getAppsScriptService();
-
-      if (!gemini) {
-        throw new Error('Gemini service not available');
-      }
-
-      // Step 1: Parse instruction with Gemini
-      const aiResult = await gemini.parseUserInstruction(instruction, context);
-
-      if (aiResult.type === 'text') {
-        return {
-          type: 'text',
-          content: aiResult.content,
-          requiresAction: false
-        };
-      }
-
-      if (aiResult.type === 'action') {
-        const action = aiResult.arguments;
-
-        // Step 2: Normalize with Hidden Parser if available
-        let normalizedAction = action;
-        if (hiddenParser) {
-          try {
-            const normalizationResult = await hiddenParser.normalize(action, { context });
-            if (normalizationResult.success) {
-              normalizedAction = normalizationResult.data;
-            }
-          } catch (error) {
-            console.warn('Normalization failed, using original action:', error);
-          }
-        }
-
-        // Step 3: Execute with Apps Script if available
-        let executionResult = null;
-        if (appsScript && normalizedAction.action) {
-          try {
-            // Add context information to the action
-            const contextualAction = {
-              ...normalizedAction,
-              spreadsheetId: normalizedAction.spreadsheetId || context.spreadsheetId,
-              tabName: normalizedAction.tabName || context.tabName
-            };
-
-            executionResult = await this.executeAction(contextualAction);
-          } catch (error) {
-            console.error('Action execution failed:', error);
-            executionResult = {
-              success: false,
-              error: error.message
-            };
-          }
-        }
-
-        return {
-          type: 'action',
-          originalInstruction: instruction,
-          parsedAction: action,
-          normalizedAction,
-          executionResult,
-          requiresAction: !executionResult
-        };
-      }
-
-      return {
-        type: 'unknown',
-        content: 'Could not process the instruction',
-        requiresAction: false
-      };
-    } catch (error) {
-      console.error('Error processing user instruction:', error);
-      return {
-        type: 'error',
-        content: `Error processing instruction: ${error.message}`,
-        requiresAction: false
-      };
-    }
-  }
-
-  /**
-   * Executes an action using the appropriate service
-   * @param {Object} action - Action to execute
-   * @returns {Promise<Object>} Execution result
-   */
-  async executeAction(action) {
-    const appsScript = this.getAppsScriptService();
-    
-    if (!appsScript) {
-      throw new Error('Apps Script service not available');
-    }
-
-    switch (action.action) {
-      case 'listTabs':
-        return appsScript.listTabs(action.spreadsheetId, action.options);
+      // Test service connections
+      const connectionTests = await this.testConnections();
       
-      case 'fetchTabData':
-        return appsScript.fetchTabData(action.spreadsheetId, action.tabName, action.options);
+      this.isInitialized = true;
       
-      case 'updateCell':
-        return appsScript.updateCell(
-          action.spreadsheetId,
-          action.tabName,
-          action.range,
-          action.data?.value,
-          action.options
-        );
-      
-      case 'addRow':
-        return appsScript.addRow(action.spreadsheetId, action.tabName, action.data, action.options);
-      
-      case 'readRange':
-        return appsScript.readRange(action.spreadsheetId, action.tabName, action.range, action.options);
-      
-      case 'discoverAll':
-        return appsScript.discoverAll(action.options);
-      
-      case 'batch':
-        return appsScript.batchOperation(action.data, action.options);
-      
-      default:
-        throw new Error(`Unknown action: ${action.action}`);
-    }
-  }
-
-  /**
-   * Analyzes spreadsheet data with AI assistance
-   * @param {Object} sheetData - Spreadsheet data
-   * @returns {Promise<Object>} Analysis result
-   */
-  async analyzeSpreadsheetData(sheetData) {
-    try {
-      const gemini = this.getGeminiService();
-      
-      if (!gemini) {
-        throw new Error('Gemini service not available');
-      }
-
-      const analysis = await gemini.analyzeSpreadsheetSchema(sheetData);
+      console.log('✅ Service Manager initialized successfully');
       
       return {
         success: true,
-        analysis,
-        timestamp: Date.now()
+        configValidation,
+        connectionTests,
+        services: this.getServiceStatus()
       };
+
     } catch (error) {
-      console.error('Error analyzing spreadsheet data:', error);
+      console.error('❌ Service Manager initialization failed:', error);
       return {
         success: false,
-        error: error.message,
-        timestamp: Date.now()
+        error: error.message
       };
     }
   }
 
   /**
-   * Gets the health status of all services
-   * @returns {Promise<Object>} Health status of all services
+   * Main processing pipeline - implements the complete flow
+   * @param {string} userPrompt - User's natural language request
+   * @param {Object} context - Additional context (spreadsheetId, tabName, etc.)
+   * @returns {Promise<Object>} Processing result
    */
-  async getServicesHealth() {
-    const health = {
-      timestamp: Date.now(),
-      services: {}
-    };
-
-    // Apps Script health
-    try {
-      const appsScript = this.getAppsScriptService();
-      if (appsScript) {
-        const appsScriptHealth = await appsScript.getHealthStatus();
-        health.services.appsScript = {
-          available: true,
-          healthy: appsScriptHealth.success || false,
-          details: appsScriptHealth
-        };
-      } else {
-        health.services.appsScript = {
-          available: false,
-          healthy: false,
-          details: { error: 'Service not initialized' }
-        };
+  async processUserRequest(userPrompt, context = {}) {
+    const processingResult = {
+      success: false,
+      steps: [],
+      finalResult: null,
+      error: null,
+      debug: {
+        userPrompt,
+        context,
+        timestamp: new Date().toISOString()
       }
-    } catch (error) {
-      health.services.appsScript = {
-        available: false,
-        healthy: false,
-        details: { error: error.message }
-      };
-    }
+    };
 
-    // Hidden Parser health
     try {
-      const hiddenParser = this.getHiddenParserService();
-      if (hiddenParser) {
-        const parserHealth = await hiddenParser.getHealthStatus();
-        health.services.hiddenParser = {
-          available: true,
-          healthy: parserHealth.healthy || false,
-          details: parserHealth
-        };
-      } else {
-        health.services.hiddenParser = {
-          available: false,
-          healthy: false,
-          details: { error: 'Service not configured' }
-        };
+      console.log('🔄 Starting user request processing...');
+      
+      // Step 1: Generate AI response
+      const aiStep = await this.generateAIResponse(userPrompt, context);
+      processingResult.steps.push(aiStep);
+      
+      if (!aiStep.success) {
+        processingResult.error = 'AI generation failed';
+        return processingResult;
       }
+
+      // Step 2: Process through guardrail layers
+      const guardrailStep = await this.processGuardrailLayers(aiStep.output, context);
+      processingResult.steps.push(guardrailStep);
+      
+      if (!guardrailStep.success) {
+        processingResult.error = 'Guardrail processing failed';
+        return processingResult;
+      }
+
+      // Step 3: Execute via Apps Script
+      const executionStep = await this.executeAppsScriptAction(guardrailStep.validJson);
+      processingResult.steps.push(executionStep);
+      
+      if (!executionStep.success) {
+        processingResult.error = 'Apps Script execution failed';
+        return processingResult;
+      }
+
+      processingResult.success = true;
+      processingResult.finalResult = executionStep.result;
+      
+      console.log('✅ User request processed successfully');
+      return processingResult;
+
     } catch (error) {
-      health.services.hiddenParser = {
-        available: false,
-        healthy: false,
-        details: { error: error.message }
-      };
+      console.error('❌ Request processing failed:', error);
+      processingResult.error = error.message;
+      return processingResult;
     }
-
-    // Gemini health (basic check)
-    const gemini = this.getGeminiService();
-    health.services.gemini = {
-      available: !!gemini,
-      healthy: !!gemini,
-      details: gemini ? { status: 'available' } : { error: 'Service not available' }
-    };
-
-    // Config health
-    const config = this.getConfigService();
-    const configValidation = config.validateConfig();
-    health.services.config = {
-      available: !!config,
-      healthy: configValidation.valid,
-      details: configValidation
-    };
-
-    return health;
   }
 
   /**
-   * Reconfigures services with new settings
-   * @param {Object} newConfig - New configuration
-   * @returns {Promise<Object>} Reconfiguration result
+   * Step 1: Generate AI response using Gemini (with OpenRouter fallback)
+   * @param {string} userPrompt - User's request
+   * @param {Object} context - Request context
+   * @returns {Promise<Object>} AI generation result
    */
-  async reconfigure(newConfig) {
+  async generateAIResponse(userPrompt, context) {
+    const step = {
+      name: 'AI Generation',
+      success: false,
+      output: null,
+      error: null,
+      attempts: []
+    };
+
     try {
-      // Update configuration
-      const config = this.getConfigService();
-      config.importConfig(newConfig);
+      // Try Gemini first
+      console.log('🤖 Generating AI response with Gemini...');
+      
+      const geminiResult = await this.geminiService.generateSpreadsheetAction(userPrompt, context);
+      step.attempts.push({
+        service: 'gemini',
+        success: geminiResult.success,
+        error: geminiResult.error
+      });
 
-      // Reset initialization state
-      this.initialized = false;
-      this.initializationPromise = null;
+      if (geminiResult.success) {
+        step.success = true;
+        step.output = geminiResult.response;
+        return step;
+      }
 
-      // Reinitialize services
-      const result = await this.initialize();
+      // Fallback to OpenRouter
+      console.log('🔄 Falling back to OpenRouter...');
+      
+      const systemPrompt = this.buildSystemPrompt();
+      const openRouterResult = await this.openRouterService.tryMultipleModels(
+        `${systemPrompt}\n\nUser request: ${userPrompt}\nContext: ${JSON.stringify(context)}`,
+        { temperature: 0.7, maxTokens: 500 }
+      );
 
+      step.attempts.push({
+        service: 'openrouter',
+        success: openRouterResult.success,
+        error: openRouterResult.error
+      });
+
+      if (openRouterResult.success) {
+        step.success = true;
+        step.output = openRouterResult.content;
+        return step;
+      }
+
+      step.error = 'Both Gemini and OpenRouter failed';
+      return step;
+
+    } catch (error) {
+      step.error = error.message;
+      return step;
+    }
+  }
+
+  /**
+   * Step 2: Process through guardrail layers
+   * @param {string} aiOutput - Raw AI output
+   * @param {Object} context - Request context
+   * @returns {Promise<Object>} Guardrail processing result
+   */
+  async processGuardrailLayers(aiOutput, context) {
+    const step = {
+      name: 'Guardrail Processing',
+      success: false,
+      validJson: null,
+      error: null,
+      layers: []
+    };
+
+    try {
+      console.log('🛡️ Processing through guardrail layers...');
+
+      // Layer 1: Regex Check
+      console.log('1️⃣ Regex Check...');
+      const regexResult = this.regexCheckService.validate(aiOutput);
+      step.layers.push({
+        name: 'Regex Check',
+        success: regexResult.valid,
+        result: regexResult
+      });
+
+      if (regexResult.valid) {
+        step.success = true;
+        step.validJson = regexResult.extractedJson;
+        return step;
+      }
+
+      // Layer 2: Normalizer
+      console.log('2️⃣ Normalizer...');
+      const normalizeResult = this.normalizerService.normalize(aiOutput);
+      step.layers.push({
+        name: 'Normalizer',
+        success: normalizeResult.success,
+        result: normalizeResult
+      });
+
+      if (normalizeResult.success) {
+        // Layer 3: Schema Validator
+        console.log('3️⃣ Schema Validator...');
+        const schemaResult = this.schemaValidatorService.validate(normalizeResult.json);
+        step.layers.push({
+          name: 'Schema Validator',
+          success: schemaResult.valid,
+          result: schemaResult
+        });
+
+        if (schemaResult.valid) {
+          step.success = true;
+          step.validJson = normalizeResult.json;
+          return step;
+        }
+      }
+
+      // Layer 4: Hidden Parser (Final fallback)
+      console.log('4️⃣ Hidden Parser...');
+      const parserResult = await this.hiddenParserService.parse(aiOutput, context);
+      step.layers.push({
+        name: 'Hidden Parser',
+        success: parserResult.success,
+        result: parserResult
+      });
+
+      if (parserResult.success) {
+        // Final schema validation
+        const finalSchemaResult = this.schemaValidatorService.validate(parserResult.json);
+        if (finalSchemaResult.valid) {
+          step.success = true;
+          step.validJson = parserResult.json;
+          return step;
+        }
+      }
+
+      step.error = 'All guardrail layers failed';
+      return step;
+
+    } catch (error) {
+      step.error = error.message;
+      return step;
+    }
+  }
+
+  /**
+   * Step 3: Execute action via Apps Script
+   * @param {Object} validJson - Validated JSON action
+   * @returns {Promise<Object>} Execution result
+   */
+  async executeAppsScriptAction(validJson) {
+    const step = {
+      name: 'Apps Script Execution',
+      success: false,
+      result: null,
+      error: null
+    };
+
+    try {
+      console.log('📊 Executing Apps Script action...');
+      
+      const result = await this.appsScriptService.executeAction(validJson);
+      
+      step.success = result.success;
+      step.result = result;
+      
+      if (!result.success) {
+        step.error = result.error;
+      }
+
+      return step;
+
+    } catch (error) {
+      step.error = error.message;
+      return step;
+    }
+  }
+
+  /**
+   * Builds system prompt for AI models
+   * @returns {string} System prompt
+   */
+  buildSystemPrompt() {
+    return `You are a Smart Spreadsheet Assistant. Convert user requests into valid JSON actions.
+
+VALID ACTIONS:
+- listTabs: List all tabs in a spreadsheet
+- fetchTabData: Get data from a specific tab
+- updateCell: Update a single cell
+- addRow: Add a new row
+- readRange: Read a range of cells
+- discoverAll: Find all accessible spreadsheets
+- health: Check system health
+
+REQUIRED FIELDS:
+- listTabs: action, spreadsheetId
+- fetchTabData: action, spreadsheetId, tabName
+- updateCell: action, spreadsheetId, tabName, range, data (with value)
+- addRow: action, spreadsheetId, tabName, data
+- readRange: action, spreadsheetId, tabName, range
+- discoverAll: action
+- health: action
+
+RESPONSE FORMAT: Return only valid JSON, no explanations.
+
+EXAMPLES:
+{"action": "listTabs", "spreadsheetId": "1abc123"}
+{"action": "updateCell", "spreadsheetId": "1abc123", "tabName": "Sheet1", "range": "A1", "data": {"value": "Hello"}}`;
+  }
+
+  /**
+   * Tests connections to all services
+   * @returns {Promise<Object>} Connection test results
+   */
+  async testConnections() {
+    const tests = {};
+
+    try {
+      // Test Gemini
+      tests.gemini = await this.geminiService.testConnection();
+    } catch (error) {
+      tests.gemini = { success: false, error: error.message };
+    }
+
+    try {
+      // Test OpenRouter
+      tests.openRouter = await this.openRouterService.testConnection();
+    } catch (error) {
+      tests.openRouter = { success: false, error: error.message };
+    }
+
+    try {
+      // Test Apps Script
+      tests.appsScript = await this.appsScriptService.testConnection();
+    } catch (error) {
+      tests.appsScript = { success: false, error: error.message };
+    }
+
+    return tests;
+  }
+
+  /**
+   * Gets status of all services
+   * @returns {Object} Service status
+   */
+  getServiceStatus() {
+    return {
+      initialized: this.isInitialized,
+      config: this.configService.validateConfig(),
+      services: {
+        gemini: this.geminiService.getStatus(),
+        openRouter: this.openRouterService.getStatus(),
+        appsScript: this.appsScriptService.getStatus(),
+        hiddenParser: this.hiddenParserService.getStatus()
+      },
+      guardrails: {
+        regexCheck: { available: true },
+        normalizer: { available: true },
+        schemaValidator: { 
+          available: true,
+          actions: this.schemaValidatorService.getAvailableActions()
+        }
+      }
+    };
+  }
+
+  /**
+   * Gets configuration service
+   * @returns {ConfigService} Configuration service instance
+   */
+  getConfigService() {
+    return this.configService;
+  }
+
+  /**
+   * Gets Apps Script service
+   * @returns {AppsScriptService} Apps Script service instance
+   */
+  getAppsScriptService() {
+    return this.appsScriptService;
+  }
+
+  /**
+   * Gets Gemini service
+   * @returns {GeminiService} Gemini service instance
+   */
+  getGeminiService() {
+    return this.geminiService;
+  }
+
+  /**
+   * Gets OpenRouter service
+   * @returns {OpenRouterService} OpenRouter service instance
+   */
+  getOpenRouterService() {
+    return this.openRouterService;
+  }
+
+  /**
+   * Processes a simple action directly (bypassing AI generation)
+   * @param {Object} action - Direct action object
+   * @returns {Promise<Object>} Processing result
+   */
+  async processDirectAction(action) {
+    try {
+      // Validate the action
+      const schemaResult = this.schemaValidatorService.validate(action);
+      
+      if (!schemaResult.valid) {
+        return {
+          success: false,
+          error: 'Invalid action schema',
+          details: schemaResult.errors
+        };
+      }
+
+      // Execute directly
+      const result = await this.appsScriptService.executeAction(action);
+      
       return {
         success: result.success,
-        message: 'Services reconfigured successfully',
-        details: result
+        result: result,
+        bypassed: ['AI Generation', 'Guardrail Processing']
       };
+
     } catch (error) {
-      console.error('Error reconfiguring services:', error);
       return {
         success: false,
-        message: `Reconfiguration failed: ${error.message}`,
-        details: { error: error.message }
+        error: error.message
       };
     }
-  }
-
-  /**
-   * Shuts down all services gracefully
-   */
-  shutdown() {
-    this.services.appsScript = null;
-    this.services.hiddenParser = null;
-    // Keep gemini and config as they are singletons
-    
-    this.initialized = false;
-    this.initializationPromise = null;
   }
 }
 
-// Create singleton instance
-const serviceManager = new ServiceManager();
-
-export default serviceManager;
+export default ServiceManager;
