@@ -66,32 +66,57 @@ class ConfigService {
    * Loads configuration from environment variables
    */
   loadFromEnvironment() {
-    // Apps Script configuration
-    if (import.meta.env.VITE_APPS_SCRIPT_URL) {
-      this.config.appsScript.url = import.meta.env.VITE_APPS_SCRIPT_URL;
+    console.log('[ConfigService] Loading environment variables...');
+    
+    // Check if import.meta.env is available (browser/Vite environment)
+    let env = {};
+    try {
+      // In browser/Vite environment, import.meta.env should be available
+      if (import.meta && import.meta.env) {
+        env = import.meta.env;
+      }
+    } catch (e) {
+      // Fallback to empty env if import.meta is not available (Node.js environment)
+      env = {};
     }
     
-    if (import.meta.env.VITE_APPS_SCRIPT_TOKEN) {
-      this.config.appsScript.token = import.meta.env.VITE_APPS_SCRIPT_TOKEN;
+    console.log(`[ConfigService] VITE_APPS_SCRIPT_URL: ${env.VITE_APPS_SCRIPT_URL || 'not set'}`);
+    console.log(`[ConfigService] VITE_APPS_SCRIPT_TOKEN: ${env.VITE_APPS_SCRIPT_TOKEN || 'not set'}`);
+    console.log(`[ConfigService] VITE_HIDDEN_PARSER_URL: ${env.VITE_HIDDEN_PARSER_URL || 'not set'}`);
+    console.log(`[ConfigService] VITE_HIDDEN_PARSER_API_KEY: ${env.VITE_HIDDEN_PARSER_API_KEY || 'not set'}`);
+    console.log(`[ConfigService] VITE_GEMINI_API_KEY: ${env.VITE_GEMINI_API_KEY || 'not set'}`);
+    console.log(`[ConfigService] VITE_OPENROUTER_API_KEY: ${env.VITE_OPENROUTER_API_KEY || 'not set'}`);
+
+    // Apps Script configuration
+    if (env.VITE_APPS_SCRIPT_URL) {
+      this.config.appsScript.url = env.VITE_APPS_SCRIPT_URL;
+    }
+
+    if (env.VITE_APPS_SCRIPT_TOKEN) {
+      this.config.appsScript.token = env.VITE_APPS_SCRIPT_TOKEN;
     }
 
     // Hidden Parser configuration
-    if (import.meta.env.VITE_HIDDEN_PARSER_URL) {
-      this.config.hiddenParser.url = import.meta.env.VITE_HIDDEN_PARSER_URL;
+    if (env.VITE_HIDDEN_PARSER_URL) {
+      this.config.hiddenParser.url = env.VITE_HIDDEN_PARSER_URL;
     }
-    
-    if (import.meta.env.VITE_HIDDEN_PARSER_API_KEY) {
-      this.config.hiddenParser.apiKey = import.meta.env.VITE_HIDDEN_PARSER_API_KEY;
+
+    if (env.VITE_HIDDEN_PARSER_API_KEY) {
+      this.config.hiddenParser.apiKey = env.VITE_HIDDEN_PARSER_API_KEY;
     }
 
     // Gemini configuration
-    if (import.meta.env.VITE_GEMINI_API_KEY) {
-      this.config.gemini.apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (env.VITE_GEMINI_API_KEY) {
+      this.config.gemini.apiKey = env.VITE_GEMINI_API_KEY;
+    }
+
+    if (env.VITE_GOOGLE_API_KEY) {
+      this.config.gemini.apiKey = env.VITE_GOOGLE_API_KEY;
     }
 
     // OpenRouter configuration
-    if (import.meta.env.VITE_OPENROUTER_API_KEY) {
-      this.config.openRouter.apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
+    if (env.VITE_OPENROUTER_API_KEY) {
+      this.config.openRouter.apiKey = env.VITE_OPENROUTER_API_KEY;
     }
   }
 

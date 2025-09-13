@@ -30,6 +30,27 @@ export default class AppsScriptService {
   }
 
   /**
+   * Gets the request URL, using proxy in development
+   * @returns {string} Request URL
+   */
+  getRequestUrl() {
+    // Check if we're in development mode and the URL is a Google Apps Script URL
+    const isDevelopment = import.meta.env?.DEV || window.location.hostname === 'localhost';
+    const isGoogleAppsScript = this.url.includes('script.google.com/macros/s/');
+    
+    if (isDevelopment && isGoogleAppsScript) {
+      // Extract the script ID from the URL
+      const scriptIdMatch = this.url.match(/\/macros\/s\/([^\/]+)\/exec/);
+      if (scriptIdMatch) {
+        const scriptId = scriptIdMatch[1];
+        return `/api/apps-script/${scriptId}/exec`;
+      }
+    }
+    
+    return this.url;
+  }
+
+  /**
    * Makes a POST request to the Apps Script endpoint with token authentication
    * @param {Object} payload - The request payload
    * @param {Object} options - Additional options
@@ -46,14 +67,18 @@ export default class AppsScriptService {
       };
 
       // Validate payload before sending
-      if (!this.validatePayload(authenticatedPayload)) {
-        throw new Error('Invalid payload format');
+      const validation = this.validatePayload(authenticatedPayload);
+      if (!validation.valid) {
+        throw new Error(`Invalid payload format: ${validation.errors.join(', ')}`);
       }
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller?.abort(), this.timeout);
       
-      const response = await fetch(this.url, {
+      // Use proxy in development to avoid CORS issues
+      const requestUrl = this.getRequestUrl();
+      
+      const response = await fetch(requestUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authenticatedPayload),
@@ -340,6 +365,91 @@ export default class AppsScriptService {
       action: 'health',
       options: { timestamp: Date.now() }
     });
+  }
+
+  /**
+   * Executes an action based on a JSON action object
+   * @param {Object} action - The action object to execute
+   * @returns {Promise<Object>} Execution result
+   */
+  async executeAction(action) {
+    if (!action || typeof action !== 'object') {
+      throw new Error('Action must be a valid object');
+    }
+
+    // Route to appropriate method based on action type
+    switch (action.action) {
+      case 'listTabs':
+        return this.listTabs(action.spreadsheetId, action.options);
+      
+      case 'fetchTabData':
+        return this.fetchTabData(action.spreadsheetId, action.tabName, action.options);
+      
+      case 'updateCell':
+        return this.updateCell(
+          action.spreadsheetId, 
+          action.tabName, 
+          action.range, 
+          action.data?.value, 
+          action.options
+        );
+      
+      case 'addRow':
+        return this.addRow(action.spreadsheetId, action.tabName, action.data, action.options);
+      
+      case 'readRange':
+        return this.readRange(action.spreadsheetId, action.tabName, action.range, action.options);
+      
+      case 'discoverAll':
+        return this.discoverAll(action.options);
+      
+      case 'health':
+        return this.getHealthStatus();
+      
+      case 'batch':
+        return this.batchOperation(action.data, action.options);
+      
+      default:
+        throw new Error(`Unknown action: ${action.action}`);
+    }
+  }
+
+  /**
+   * Tests connection to the Apps Script service
+   * @returns {Promise<Object>} Connection test result
+   */
+  async testConnection() {
+    try {
+      const result = await this.getHealthStatus();
+      return {
+        success: result.success,
+        status: result.success ? 'connected' : 'failed',
+        message: result.success ? 'Apps Script service is reachable' : 'Health check failed',
+        details: result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        status: 'failed',
+        message: `Connection failed: ${error.message}`,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Gets the current status of the Apps Script service
+   * @returns {Object} Service status
+   */
+  getStatus() {
+    return {
+      configured: !!(this.url && this.token),
+      url: this.url ? '[SET]' : '[NOT SET]',
+      token: this.token ? '[SET]' : '[NOT SET]',
+      hiddenParserUrl: this.hiddenParserUrl ? '[SET]' : '[NOT SET]',
+      timeout: this.timeout,
+      retryAttempts: this.retryAttempts
+    };
   }
 
   /**

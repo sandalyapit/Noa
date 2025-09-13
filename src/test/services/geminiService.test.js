@@ -1,345 +1,443 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import GeminiService from '../../services/geminiService'
 
-// Mock the Google Generative AI
+// Mock the Google Generative AI at the package level
+const mockModel = {
+  generateContent: vi.fn(),
+  generateContentStream: vi.fn(),
+  startChat: vi.fn()
+}
+
+const mockGenAI = {
+  getGenerativeModel: vi.fn(() => mockModel)
+}
+
 vi.mock('@google/generative-ai', () => ({
-  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-    getGenerativeModel: vi.fn().mockReturnValue({
-      generateContent: vi.fn(),
-      startChat: vi.fn().mockReturnValue({
-        sendMessage: vi.fn()
-      })
-    })
-  }))
+  GoogleGenerativeAI: vi.fn(() => mockGenAI)
+}))
+
+// Mock the geminiClient to return our mocked genAI
+vi.mock('../../services/geminiClient.js', () => ({
+  default: mockGenAI
 }))
 
 describe('GeminiService', () => {
-  let service
-  let mockModel
+  let geminiService
 
-  beforeEach(() => {
-    const { GoogleGenerativeAI } = require('@google/generative-ai')
-    const mockGenAI = new GoogleGenerativeAI()
-    mockModel = mockGenAI.getGenerativeModel()
-    
-    service = new GeminiService('test-api-key')
-    service.genAI = mockGenAI
-    service.model = mockModel
-    
+  beforeEach(async () => {
+    // Clear all mocks
     vi.clearAllMocks()
+    
+    // Re-import the service after mocking
+    const { default: GeminiServiceModule } = await import('../../services/geminiService.js')
+    geminiService = GeminiServiceModule
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  describe('constructor', () => {
-    it('should initialize with API key', () => {
-      expect(service.apiKey).toBe('test-api-key')
+  describe('Constructor initializes properly', () => {
+    it('should initialize service with model and empty chat history', () => {
+      expect(geminiService.model).toBeDefined()
+      expect(geminiService.chatHistory).toEqual([])
+      expect(mockGenAI.getGenerativeModel).toHaveBeenCalledWith({
+        model: 'gemini-1.5-flash',
+        generationConfig: {
+          temperature: 0.7,
+          topP: 0.8,
+          topK: 40,
+          maxOutputTokens: 2048,
+        }
+      })
     })
 
-    it('should throw error if API key is missing', () => {
-      expect(() => new GeminiService()).toThrow('Gemini API key is required')
+    it('should be a singleton instance', () => {
+      // The service should be instantiated as singleton
+      expect(geminiService.constructor.name).toBe('GeminiService')
+      expect(Array.isArray(geminiService.chatHistory)).toBe(true)
     })
   })
 
-  describe('parseUserInstruction', () => {
-    it('should parse simple add row instruction', async () => {
+  describe('Generate text successfully', () => {
+    it('should generate text from prompt', async () => {
       const mockResponse = {
         response: {
-          text: () => JSON.stringify({
-            action: 'addRow',
-            data: {
-              Product: 'iPhone 15',
-              Revenue: 1200,
-              Quantity: 1,
-              Region: 'US'
-            },
-            confidence: 0.9
-          })
+          text: () => 'Generated text response'
         }
       }
 
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
+      mockModel.generateContent.mockResolvedValue(mockResponse)
 
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue', 'Quantity', 'Region'],
-        sampleData: [
-          ['iPhone 14', 1000, 2, 'US'],
-          ['iPad Pro', 800, 1, 'EU']
-        ]
+      const result = await geminiService.generateText('Test prompt')
+
+      expect(mockModel.generateContent).toHaveBeenCalledWith('Test prompt')
+      expect(result).toBe('Generated text response')
+    })
+
+    it('should handle undefined response gracefully', async () => {
+      const mockResponse = {
+        response: {
+          text: () => undefined
+        }
       }
 
-      const result = await service.parseUserInstruction(
-        'Add a new row with iPhone 15, revenue 1200, quantity 1, region US',
-        context
+      mockModel.generateContent.mockResolvedValue(mockResponse)
+
+      const result = await geminiService.generateText('Test prompt')
+
+      expect(result).toBeUndefined()
+    })
+  })
+
+  describe('Stream text with callback', () => {
+    it('should stream text with callback function', async () => {
+      const mockChunks = [
+        { text: () => 'Hello ' },
+        { text: () => 'world!' },
+        { text: () => null }, // Should be ignored
+      ]
+
+      // Create proper async iterator
+      const createAsyncIterator = (items) => ({
+        [Symbol.asyncIterator]: async function* () {
+          for (const item of items) {
+            yield item
+          }
+        }
+      })
+
+      const mockStream = {
+        stream: createAsyncIterator(mockChunks)
+      }
+
+      mockModel.generateContentStream.mockResolvedValue(mockStream)
+
+      const onChunkCallback = vi.fn()
+      await geminiService.streamText('Test prompt', onChunkCallback)
+
+      expect(mockModel.generateContentStream).toHaveBeenCalledWith('Test prompt')
+      expect(onChunkCallback).toHaveBeenCalledWith('Hello ')
+      expect(onChunkCallback).toHaveBeenCalledWith('world!')
+      expect(onChunkCallback).toHaveBeenCalledTimes(2) // null chunk should be ignored
+    })
+
+    it('should handle missing callback gracefully', async () => {
+      const mockChunks = [
+        { text: () => 'Hello ' }
+      ]
+
+      // Create proper async iterator
+      const createAsyncIterator = (items) => ({
+        [Symbol.asyncIterator]: async function* () {
+          for (const item of items) {
+            yield item
+          }
+        }
+      })
+
+      const mockStream = {
+        stream: createAsyncIterator(mockChunks)
+      }
+
+      mockModel.generateContentStream.mockResolvedValue(mockStream)
+
+      // Should not throw when callback is missing
+      await expect(geminiService.streamText('Test prompt')).resolves.toBeUndefined()
+    })
+  })
+
+  describe('Parse user instruction with tools', () => {
+    it('should parse instruction and return function call result', async () => {
+      const mockResponse = {
+        response: {
+          candidates: [{
+            content: {
+              parts: [{
+                functionCall: {
+                  name: 'create_spreadsheet_action',
+                  args: {
+                    action: 'addRow',
+                    spreadsheetId: 'test-id',
+                    tabName: 'Sheet1',
+                    data: { name: 'Test', value: 123 }
+                  }
+                }
+              }]
+            }
+          }]
+        }
+      }
+
+      mockModel.generateContent.mockResolvedValue(mockResponse)
+
+      const sheetContext = {
+        spreadsheetId: 'test-id',
+        tabName: 'Sheet1',
+        headers: ['name', 'value']
+      }
+
+      const result = await geminiService.parseUserInstruction(
+        'Add a new row with name Test and value 123',
+        sheetContext
       )
 
       expect(result).toEqual({
-        action: 'addRow',
-        data: {
-          Product: 'iPhone 15',
-          Revenue: 1200,
-          Quantity: 1,
-          Region: 'US'
-        },
-        confidence: 0.9
+        type: 'action',
+        functionName: 'create_spreadsheet_action',
+        arguments: {
+          action: 'addRow',
+          spreadsheetId: 'test-id',
+          tabName: 'Sheet1',
+          data: { name: 'Test', value: 123 }
+        }
+      })
+
+      // Verify correct model was used (should be called twice: once in constructor, once in parseUserInstruction)
+      expect(mockGenAI.getGenerativeModel).toHaveBeenCalledWith({
+        model: 'gemini-1.5-pro',
+        tools: expect.any(Array)
       })
     })
 
-    it('should parse update cell instruction', async () => {
+    it('should return text response when no function call', async () => {
       const mockResponse = {
         response: {
-          text: () => JSON.stringify({
-            action: 'updateCell',
-            range: 'B2',
-            data: { value: 'iPhone 15 Pro' },
-            confidence: 0.85
-          })
+          candidates: [{
+            content: {
+              parts: [{
+                text: 'I need more information to help you with that request.'
+              }]
+            }
+          }]
         }
       }
 
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
+      mockModel.generateContent.mockResolvedValue(mockResponse)
 
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue', 'Quantity', 'Region'],
-        sampleData: [
-          ['iPhone 14', 1000, 2, 'US'],
-          ['iPad Pro', 800, 1, 'EU']
-        ]
-      }
-
-      const result = await service.parseUserInstruction(
-        'Change the product in row 2 to iPhone 15 Pro',
-        context
-      )
+      const result = await geminiService.parseUserInstruction('Unclear request')
 
       expect(result).toEqual({
-        action: 'updateCell',
-        range: 'B2',
-        data: { value: 'iPhone 15 Pro' },
-        confidence: 0.85
+        type: 'text',
+        content: 'I need more information to help you with that request.'
       })
     })
 
-    it('should handle malformed JSON response', async () => {
+    it('should handle empty content gracefully', async () => {
       const mockResponse = {
         response: {
-          text: () => 'This is not valid JSON'
+          candidates: [{
+            content: {
+              parts: [{}]
+            }
+          }]
         }
       }
 
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
+      mockModel.generateContent.mockResolvedValue(mockResponse)
 
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue'],
-        sampleData: []
-      }
-
-      const result = await service.parseUserInstruction('Add a row', context)
+      const result = await geminiService.parseUserInstruction('Test')
 
       expect(result).toEqual({
-        success: false,
-        error: 'Failed to parse AI response',
-        rawResponse: 'This is not valid JSON'
+        type: 'text',
+        content: 'Could not process the instruction'
       })
-    })
-
-    it('should handle API errors', async () => {
-      mockModel.generateContent.mockRejectedValueOnce(new Error('API quota exceeded'))
-
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product'],
-        sampleData: []
-      }
-
-      const result = await service.parseUserInstruction('Add a row', context)
-
-      expect(result).toEqual({
-        success: false,
-        error: 'API quota exceeded'
-      })
-    })
-
-    it('should include context in prompt', async () => {
-      const mockResponse = {
-        response: {
-          text: () => JSON.stringify({ action: 'addRow', data: {} })
-        }
-      }
-
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
-
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue'],
-        sampleData: [['iPhone', 1000]]
-      }
-
-      await service.parseUserInstruction('Add a new product', context)
-
-      const callArgs = mockModel.generateContent.mock.calls[0][0]
-      expect(callArgs).toContain('Sales Data')
-      expect(callArgs).toContain('Product')
-      expect(callArgs).toContain('Revenue')
-      expect(callArgs).toContain('iPhone')
     })
   })
 
-  describe('generateSuggestions', () => {
-    it('should generate contextual suggestions', async () => {
-      const mockResponse = {
-        response: {
-          text: () => JSON.stringify({
-            suggestions: [
-              'Add a new sales record',
-              'Update the revenue for iPhone',
-              'Calculate total revenue',
-              'Filter data by region'
-            ]
-          })
-        }
-      }
+  describe('Handle API errors gracefully', () => {
+    it('should handle generateText API errors', async () => {
+      mockModel.generateContent.mockRejectedValue(new Error('API quota exceeded'))
 
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
+      await expect(geminiService.generateText('Test'))
+        .rejects
+        .toThrow('Failed to generate text response')
+    })
 
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue', 'Region'],
-        sampleData: [
-          ['iPhone', 1000, 'US'],
-          ['iPad', 800, 'EU']
-        ]
-      }
+    it('should handle streamText API errors', async () => {
+      mockModel.generateContentStream.mockRejectedValue(new Error('Network error'))
 
-      const result = await service.generateSuggestions(context)
+      await expect(geminiService.streamText('Test', vi.fn()))
+        .rejects
+        .toThrow('Failed to stream text response')
+    })
+
+    it('should handle parseUserInstruction API errors', async () => {
+      mockModel.generateContent.mockRejectedValue(new Error('API error'))
+
+      const result = await geminiService.parseUserInstruction('Test')
 
       expect(result).toEqual({
-        suggestions: [
-          'Add a new sales record',
-          'Update the revenue for iPhone',
-          'Calculate total revenue',
-          'Filter data by region'
-        ]
+        type: 'text',
+        content: 'Sorry, I couldn\'t understand that instruction. Please try rephrasing it.'
       })
     })
 
-    it('should handle empty context gracefully', async () => {
-      const mockResponse = {
-        response: {
-          text: () => JSON.stringify({
-            suggestions: [
-              'Connect a spreadsheet to get started',
-              'Upload data to analyze',
-              'Create a new spreadsheet'
-            ]
-          })
-        }
+    it('should handle chatWithHistory API errors', async () => {
+      const mockChat = {
+        sendMessage: vi.fn().mockRejectedValue(new Error('Chat error'))
       }
 
-      mockModel.generateContent.mockResolvedValueOnce(mockResponse)
+      mockModel.startChat.mockReturnValue(mockChat)
 
-      const result = await service.generateSuggestions({})
-
-      expect(result.suggestions).toHaveLength(3)
+      await expect(geminiService.chatWithHistory('Test'))
+        .rejects
+        .toThrow('Failed to process chat message')
     })
   })
 
-  describe('startChat', () => {
-    it('should initialize chat session with context', async () => {
+  describe('Sanitize spreadsheet input', () => {
+    it('should return empty string for null/undefined input', () => {
+      expect(geminiService.sanitizeForSpreadsheet(null)).toBe('')
+      expect(geminiService.sanitizeForSpreadsheet(undefined)).toBe('')
+      expect(geminiService.sanitizeForSpreadsheet('')).toBe('')
+    })
+
+    it('should escape formula injection characters', () => {
+      expect(geminiService.sanitizeForSpreadsheet('=SUM(A1:A10)')).toBe("'=SUM(A1:A10)")
+      expect(geminiService.sanitizeForSpreadsheet('+123')).toBe("'+123")
+      expect(geminiService.sanitizeForSpreadsheet('-456')).toBe("'-456")
+      expect(geminiService.sanitizeForSpreadsheet('@mention')).toBe("'@mention")
+    })
+
+    it('should trim whitespace', () => {
+      expect(geminiService.sanitizeForSpreadsheet('  hello world  ')).toBe('hello world')
+    })
+
+    it('should limit length to 1000 characters', () => {
+      const longText = 'A'.repeat(1500)
+      const result = geminiService.sanitizeForSpreadsheet(longText)
+      
+      expect(result).toHaveLength(1000)
+      expect(result).toBe('A'.repeat(997) + '...')
+    })
+
+    it('should handle normal text unchanged', () => {
+      expect(geminiService.sanitizeForSpreadsheet('Normal text')).toBe('Normal text')
+      expect(geminiService.sanitizeForSpreadsheet('123')).toBe('123')
+    })
+  })
+
+  describe('Chat with history works', () => {
+    it('should maintain chat history and return response', async () => {
       const mockChat = {
         sendMessage: vi.fn().mockResolvedValue({
           response: {
-            text: () => 'Hello! I can help you with your spreadsheet.'
+            text: () => 'Hello! How can I help you?'
           }
         })
       }
 
       mockModel.startChat.mockReturnValue(mockChat)
 
-      const context = {
-        spreadsheetId: 'test-id',
-        tabName: 'Sales Data',
-        headers: ['Product', 'Revenue']
+      const initialHistory = [
+        { role: 'user', parts: [{ text: 'Previous message' }] }
+      ]
+
+      const result = await geminiService.chatWithHistory('Hello', initialHistory)
+
+      expect(mockModel.startChat).toHaveBeenCalledWith({ history: initialHistory })
+      expect(mockChat.sendMessage).toHaveBeenCalledWith('Hello')
+      expect(result).toEqual({
+        response: 'Hello! How can I help you?',
+        updatedHistory: [
+          { role: 'user', parts: [{ text: 'Previous message' }] },
+          { role: 'user', parts: [{ text: 'Hello' }] },
+          { role: 'model', parts: [{ text: 'Hello! How can I help you?' }] }
+        ]
+      })
+    })
+
+    it('should work with empty history', async () => {
+      const mockChat = {
+        sendMessage: vi.fn().mockResolvedValue({
+          response: {
+            text: () => 'Welcome!'
+          }
+        })
       }
 
-      const chat = service.startChat(context)
-      const response = await chat.sendMessage('Hello')
+      mockModel.startChat.mockReturnValue(mockChat)
 
-      expect(mockModel.startChat).toHaveBeenCalledWith({
-        history: [],
-        generationConfig: {
-          maxOutputTokens: 1000,
-          temperature: 0.7
-        }
-      })
+      const result = await geminiService.chatWithHistory('First message')
 
-      expect(response.response.text()).toBe('Hello! I can help you with your spreadsheet.')
+      expect(mockModel.startChat).toHaveBeenCalledWith({ history: [] })
+      expect(result.updatedHistory).toHaveLength(2)
     })
   })
 
-  describe('validateAction', () => {
-    it('should validate addRow action', () => {
-      const action = {
-        action: 'addRow',
-        data: {
-          Product: 'iPhone',
-          Revenue: 1000
+  describe('Additional utility methods', () => {
+    it('should analyze spreadsheet schema', async () => {
+      mockModel.generateContent.mockResolvedValue({
+        response: {
+          text: () => 'Schema analysis results'
         }
+      })
+
+      const sheetData = {
+        sheetName: 'Test Sheet',
+        dimensions: { rows: 10, cols: 3 },
+        headers: ['Name', 'Age', 'City'],
+        schema: [
+          { name: 'Name', dataType: { type: 'string' }, stats: { nonEmpty: 8 } }
+        ],
+        sampleValues: [['John', '25', 'NYC'], ['Jane', '30', 'LA']]
       }
 
-      const headers = ['Product', 'Revenue', 'Quantity']
-      const result = service.validateAction(action, headers)
+      const result = await geminiService.analyzeSpreadsheetSchema(sheetData)
 
-      expect(result.valid).toBe(true)
-      expect(result.warnings).toContain('Missing data for column: Quantity')
+      expect(result).toBe('Schema analysis results')
+      
+      const callArgs = mockModel.generateContent.mock.calls[0][0]
+      expect(callArgs).toContain('Test Sheet')
+      expect(callArgs).toContain('10 rows × 3 columns')
+      expect(callArgs).toContain('Name, Age, City')
     })
 
-    it('should validate updateCell action', () => {
-      const action = {
-        action: 'updateCell',
-        range: 'B5',
-        data: { value: 'New Value' }
+    it('should suggest data transformation', async () => {
+      mockModel.generateContent.mockResolvedValue({
+        response: {
+          text: () => 'Transformation suggestions'
+        }
+      })
+
+      const sourceData = {
+        headers: ['Name', 'Sales'],
+        sampleValues: [['John', '1000'], ['Jane', '1500']]
       }
 
-      const result = service.validateAction(action, ['Product', 'Revenue'])
+      const result = await geminiService.suggestDataTransformation(
+        sourceData,
+        'Convert sales to numbers and add tax column'
+      )
 
-      expect(result.valid).toBe(true)
-      expect(result.warnings).toHaveLength(0)
+      expect(result).toBe('Transformation suggestions')
+      
+      const callArgs = mockModel.generateContent.mock.calls[0][0]
+      expect(callArgs).toContain('Name, Sales')
+      expect(callArgs).toContain('Convert sales to numbers and add tax column')
     })
 
-    it('should reject invalid actions', () => {
-      const action = {
-        action: 'deleteSheet'
-      }
+    it('should clear chat history', () => {
+      geminiService.chatHistory = [
+        { role: 'user', parts: [{ text: 'test' }] }
+      ]
 
-      const result = service.validateAction(action, ['Product'])
+      geminiService.clearChatHistory()
 
-      expect(result.valid).toBe(false)
-      expect(result.errors).toContain('Unsupported action: deleteSheet')
+      expect(geminiService.chatHistory).toEqual([])
     })
 
-    it('should validate range format', () => {
-      const action = {
-        action: 'updateCell',
-        range: 'invalid-range',
-        data: { value: 'test' }
-      }
+    it('should get chat history copy', () => {
+      const testHistory = [
+        { role: 'user', parts: [{ text: 'test' }] }
+      ]
+      
+      geminiService.chatHistory = testHistory
 
-      const result = service.validateAction(action, ['Product'])
+      const history = geminiService.getChatHistory()
 
-      expect(result.valid).toBe(false)
-      expect(result.errors).toContain('Invalid range format: invalid-range')
+      expect(history).toEqual(testHistory)
+      expect(history).not.toBe(testHistory) // Should be a copy
     })
   })
 })

@@ -9,7 +9,7 @@ vi.mock('../../services/geminiService')
 vi.mock('../../services/hiddenParserService')
 
 import { AppsScriptService } from '../../services/appsScriptService'
-import { GeminiService } from '../../services/geminiService'
+import GeminiService from '../../services/geminiService.js'
 import { HiddenParserService } from '../../services/hiddenParserService'
 
 describe('End-to-End Integration Tests', () => {

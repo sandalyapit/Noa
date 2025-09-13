@@ -6,7 +6,7 @@
  * 3. Apps Script Execution
  */
 
-import ConfigService from './configService.js';
+import configService from './configService.js';
 import RegexCheckService from './regexCheckService.js';
 import NormalizerService from './normalizerService.js';
 import SchemaValidatorService from './schemaValidatorService.js';
@@ -18,7 +18,7 @@ import AppsScriptService from './appsScriptService.js';
 class ServiceManager {
   constructor() {
     // Initialize core services
-    this.configService = new ConfigService();
+    this.configService = configService;
     
     // Initialize guardrail services
     this.regexCheckService = new RegexCheckService();
@@ -30,8 +30,13 @@ class ServiceManager {
     this.openRouterService = new OpenRouterService(this.configService);
     this.hiddenParserService = new HiddenParserService(this.configService, this.openRouterService);
     
-    // Initialize Apps Script service
-    this.appsScriptService = new AppsScriptService(this.configService);
+    // Initialize Apps Script service with proper config
+    const appsConfig = this.configService.getServiceInitConfig().appsScript;
+    this.appsScriptService = new AppsScriptService(
+      appsConfig.url, 
+      appsConfig.token, 
+      appsConfig.hiddenParserUrl
+    );
     
     this.isInitialized = false;
   }
@@ -471,6 +476,19 @@ EXAMPLES:
       };
     }
   }
+
+  /**
+   * Execute an action directly (alias for processDirectAction for backward compatibility)
+   * @param {Object} action - Direct action object
+   * @returns {Promise<Object>} Processing result
+   */
+  async executeAction(action) {
+    return this.processDirectAction(action);
+  }
 }
 
-export default ServiceManager;
+// Create and export a singleton instance
+const serviceManager = new ServiceManager();
+
+export default serviceManager;
+export { ServiceManager };

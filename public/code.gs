@@ -31,7 +31,7 @@ const SNAPSHOT_FOLDER_NAME = 'SSA_Snapshots';
  * Serves a minimal web interface (optional)
  */
 function doGet(e) {
-  return HtmlService.createHtmlOutput(`
+  const output = HtmlService.createHtmlOutput(`
     <html>
       <body>
         <h1>Smart Spreadsheet Assistant API</h1>
@@ -50,9 +50,28 @@ function doGet(e) {
         <p><strong>Status:</strong> ✅ Service is running</p>
         <p><strong>Version:</strong> 1.0.1</p>
         <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+        <p><strong>CORS:</strong> ✅ Enabled for cross-origin requests</p>
       </body>
     </html>
   `);
+  
+  // Add CORS headers for web interface
+  output.addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  output.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  return output;
+}
+
+/**
+ * Handle OPTIONS requests for CORS preflight
+ */
+function doOptions(e) {
+  return jsonResponse(200, {
+    success: true,
+    message: 'CORS preflight successful',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    headers: ['Content-Type', 'Authorization'],
+    timestamp: new Date().toISOString()
+  });
 }
 
 /**
@@ -619,8 +638,18 @@ function handleDiscoverAll(payload) {
 function jsonResponse(status, body) {
   const output = ContentService.createTextOutput(JSON.stringify(body))
     .setMimeType(ContentService.MimeType.JSON);
+  
+  // Add CORS headers to allow cross-origin requests
   // Note: Apps Script doesn't allow setting HTTP status codes directly
-  return output;
+  // but we can include the status in the response body
+  const responseBody = {
+    ...body,
+    _status: status,
+    _timestamp: new Date().toISOString()
+  };
+  
+  return ContentService.createTextOutput(JSON.stringify(responseBody))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function quickValidate(payload) {

@@ -1,11 +1,12 @@
-import genAI from './geminiClient';
+import genAI from './geminiClient.js';
 
 /**
  * Gemini AI Service for Smart Spreadsheet Assistant
  * Handles AI-powered analysis and text generation
  */
 class GeminiService {
-  constructor() {
+  constructor(configService = null) {
+    this.configService = configService;
     this.model = genAI?.getGenerativeModel({ 
       model: 'gemini-1.5-flash',
       generationConfig: {
@@ -279,9 +280,59 @@ Provide practical, actionable advice.
   getChatHistory() {
     return [...this.chatHistory];
   }
+
+  /**
+   * Generates a spreadsheet action JSON string from natural language.
+   * Returns { success, response, error }
+   */
+  async generateSpreadsheetAction(userPrompt, context = {}) {
+    try {
+      const parsed = await this.parseUserInstruction(userPrompt, context);
+
+      if (parsed?.type === 'action') {
+        const args = parsed.arguments || {};
+        const payload = {
+          action: args.action,
+          spreadsheetId: args.spreadsheetId || context.spreadsheetId || '',
+          tabName: args.tabName || context.tabName || '',
+          range: args.range,
+          data: args.data,
+          options: args.options || { dryRun: false }
+        };
+        // Remove undefined keys for cleanliness
+        Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+        return { success: true, response: JSON.stringify(payload) };
+      }
+
+      return { success: false, response: parsed?.content || '', error: 'No actionable output' };
+    } catch (error) {
+      console.error('generateSpreadsheetAction error:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Lightweight connectivity check to Gemini
+   */
+  async testConnection() {
+    try {
+      const txt = await this.generateText('Respond with OK');
+      const ok = typeof txt === 'string' && txt.length > 0;
+      return { success: ok, message: ok ? 'Gemini reachable' : 'Empty response' };
+    } catch (e) {
+      return { success: false, error: String(e?.message || e) };
+    }
+  }
+
+  /**
+   * Status for diagnostics panels
+   */
+  getStatus() {
+    return {
+      configured: !!this.model,
+      model: 'gemini-1.5-flash'
+    };
+  }
 }
 
-// Create singleton instance
-const geminiService = new GeminiService();
-
-export default geminiService;
+export default GeminiService;

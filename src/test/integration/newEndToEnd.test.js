@@ -13,7 +13,7 @@ vi.mock('../../services/schemaValidatorService');
 vi.mock('../../services/normalizerService');
 
 import { AppsScriptService } from '../../services/appsScriptService';
-import { GeminiService } from '../../services/geminiService';
+import GeminiService from '../../services/geminiService.js';
 import { HiddenParserService } from '../../services/hiddenParserService';
 import { RegexCheckService } from '../../services/regexCheckService';
 import { SchemaValidatorService } from '../../services/schemaValidatorService';

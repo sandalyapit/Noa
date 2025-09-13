@@ -2,21 +2,24 @@
  * Google Apps Script Code for Smart Spreadsheet Assistant
  * 
  * DEPLOYMENT INSTRUCTIONS:
- * 1. Copy this entire file content
- * 2. Go to https://script.google.com
- * 3. Create a new project
- * 4. Replace the default Code.gs content with this code
- * 5. Go to Project Settings > Script Properties and add:
- *    - API_TOKEN: your-secure-random-token (generate with: openssl rand -base64 32)
- *    - HIDDEN_PARSER_URL: (optional) your hidden parser service URL
- * 6. Save the project
- * 7. Deploy as web app:
- *    - New deployment > Type: Web app
+ * 1. Go to https://script.google.com
+ * 2. Create a new project
+ * 3. Replace the default Code.gs content with this entire file
+ * 4. Save the project (Ctrl+S)
+ * 5. Deploy as web app:
+ *    - Click "Deploy" > "New deployment"
+ *    - Type: Web app
  *    - Execute as: Me
- *    - Who has access: Anyone
- * 8. Copy the web app URL and use it in your React app
+ *    - Who has access: Anyone (or "Anyone with Google account" for more security)
+ * 6. Copy the web app URL and use it in your React app's .env file
+ * 7. Set up Script Properties (see CONFIGURATION section below)
  * 
- * IMPORTANT: This code is production-ready with security features
+ * CONFIGURATION:
+ * Go to Project Settings (gear icon) > Script Properties and add:
+ * - API_TOKEN: A secure random token (generate with: openssl rand -base64 32)
+ * - HIDDEN_PARSER_URL: (Optional) URL for your hidden parser service
+ * 
+ * IMPORTANT: This is production-ready code with security, audit logging, and snapshots
  */
 
 // Constants for configuration
@@ -30,42 +33,23 @@ const SNAPSHOT_FOLDER_NAME = 'SSA_Snapshots';
 function doGet(e) {
   return HtmlService.createHtmlOutput(`
     <html>
-      <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px;">
-        <h1>🤖 Smart Spreadsheet Assistant API</h1>
+      <body>
+        <h1>Smart Spreadsheet Assistant API</h1>
         <p>This is the backend service for the Smart Spreadsheet Assistant.</p>
         <p>Send POST requests with JSON payload to interact with Google Sheets.</p>
-        
-        <h3>📋 Supported Actions:</h3>
+        <h3>Supported Actions:</h3>
         <ul>
-          <li><strong>listTabs</strong> - List all tabs in a spreadsheet</li>
-          <li><strong>fetchTabData</strong> - Fetch tab data with schema analysis</li>
-          <li><strong>updateCell</strong> - Update a single cell</li>
-          <li><strong>addRow</strong> - Add a new row</li>
-          <li><strong>readRange</strong> - Read a specific range</li>
-          <li><strong>discoverAll</strong> - Discover accessible spreadsheets</li>
-          <li><strong>batch</strong> - Execute multiple actions</li>
-          <li><strong>health</strong> - Health check</li>
+          <li>listTabs - List all tabs in a spreadsheet</li>
+          <li>fetchTabData - Fetch tab data with schema analysis</li>
+          <li>updateCell - Update a single cell</li>
+          <li>addRow - Add a new row</li>
+          <li>readRange - Read a specific range</li>
+          <li>discoverAll - Discover accessible spreadsheets</li>
+          <li>health - Health check</li>
         </ul>
-        
-        <h3>🔧 Configuration Status:</h3>
-        <ul>
-          <li>API Token: ${PropertiesService.getScriptProperties().getProperty('API_TOKEN') ? '✅ Configured' : '❌ Missing'}</li>
-          <li>Hidden Parser: ${PropertiesService.getScriptProperties().getProperty('HIDDEN_PARSER_URL') ? '✅ Configured' : '⚠️ Optional'}</li>
-        </ul>
-        
-        <h3>📖 Example Request:</h3>
-        <pre style="background: #f5f5f5; padding: 10px; border-radius: 5px;">
-{
-  "token": "your-api-token",
-  "action": "listTabs",
-  "spreadsheetId": "1uus7f...",
-  "options": {
-    "author": "user@example.com"
-  }
-}
-        </pre>
-        
-        <p><em>Status: Ready for deployment</em></p>
+        <p><strong>Status:</strong> ✅ Service is running</p>
+        <p><strong>Version:</strong> 1.0.1</p>
+        <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
       </body>
     </html>
   `);
@@ -75,670 +59,925 @@ function doGet(e) {
  * Main API endpoint - handles all POST requests
  */
 function doPost(e) {
+  let payload;
+  
   try {
-    // Parse request body
-    const payload = JSON.parse(e.postData.contents);
-    
-    // Authenticate request
-    if (!authenticateRequest(payload)) {
-      return createErrorResponse('Unauthorized', 401);
+    // Validate request
+    if (!e?.postData?.contents) {
+      return jsonResponse(400, { success: false, error: 'No request body provided' });
     }
+
+    try {
+      payload = JSON.parse(e.postData.contents);
+    } catch (parseError) {
+      console.error('JSON parse error:', parseError);
+      return jsonResponse(400, { success: false, error: 'Invalid JSON in request body' });
+    }
+
+    // Ensure payload is an object
+    if (!payload || typeof payload !== 'object') {
+      return jsonResponse(400, { success: false, error: 'Payload must be a valid object' });
+    }
+
+    // Token authentication
+    const props = PropertiesService.getScriptProperties();
+    const apiToken = props.getProperty('API_TOKEN');
     
+    if (apiToken && (!payload.token || payload.token !== apiToken)) {
+      return jsonResponse(401, { 
+        success: false, 
+        error: 'Unauthorized: Invalid or missing API token' 
+      });
+    }
+
+    // Validate action
+    if (!payload.action) {
+      return jsonResponse(400, { success: false, error: 'Missing required field: action' });
+    }
+
+    const allowedActions = ['listTabs', 'fetchTabData', 'updateCell', 'addRow', 'readRange', 'discoverAll', 'health'];
+    if (!allowedActions.includes(payload.action)) {
+      return jsonResponse(400, { success: false, error: `Unknown action: ${payload.action}` });
+    }
+
     // Quick validation
-    const validationResult = quickValidate(payload);
-    if (!validationResult.valid) {
+    const validation = quickValidate(payload);
+    if (!validation.valid) {
       // Try hidden parser if available and validation failed
-      if (validationResult.needsNormalization) {
-        const normalizedPayload = tryHiddenParser(payload);
-        if (normalizedPayload) {
-          return processAction(normalizedPayload);
+      const parserUrl = props.getProperty('HIDDEN_PARSER_URL');
+      if (parserUrl) {
+        try {
+          const normalized = callHiddenParser(parserUrl, payload);
+          if (normalized && normalized.ok && normalized.data) {
+            payload = normalized.data; // Use normalized payload
+          } else {
+            return jsonResponse(422, { 
+              success: false, 
+              error: 'Validation failed', 
+              details: validation.errors,
+              needsNormalization: true,
+              normalizeError: normalized
+            });
+          }
+        } catch (normalizationError) {
+          console.error('Normalization failed:', normalizationError);
+          return jsonResponse(422, { 
+            success: false, 
+            error: 'Validation failed', 
+            details: validation.errors,
+            needsNormalization: true,
+            normalizeError: String(normalizationError)
+          });
         }
+      } else {
+        return jsonResponse(422, { 
+          success: false, 
+          error: 'Validation failed', 
+          details: validation.errors,
+          needsNormalization: true
+        });
       }
-      return createErrorResponse('Validation failed', 422, validationResult.errors);
     }
-    
-    // Process the action
-    return processAction(payload);
-    
+
+    // Route to appropriate handler - PASS PAYLOAD EXPLICITLY
+    switch (payload.action) {
+      case 'listTabs':
+        return handleListTabs(payload);
+      case 'fetchTabData':
+        return handleFetchTabData(payload);
+      case 'readRange':
+        return handleReadRange(payload);
+      case 'updateCell':
+        return handleUpdateCell(payload);
+      case 'addRow':
+        return handleAddRow(payload);
+      case 'discoverAll':
+        return handleDiscoverAll(payload);
+      case 'health':
+        return handleHealth(payload);
+      default:
+        return jsonResponse(400, { success: false, error: 'Unhandled action' });
+    }
+
   } catch (error) {
     console.error('doPost error:', error);
-    return createErrorResponse('Internal server error: ' + error.message, 500);
-  }
-}
-
-/**
- * Authenticates the request using API token
- */
-function authenticateRequest(payload) {
-  const expectedToken = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
-  if (!expectedToken) {
-    console.error('API_TOKEN not configured in Script Properties');
-    return false;
-  }
-  
-  return payload.token === expectedToken;
-}
-
-/**
- * Quick validation of payload structure
- */
-function quickValidate(payload) {
-  const errors = [];
-  let needsNormalization = false;
-  
-  if (!payload.action) {
-    errors.push('action is required');
-    needsNormalization = true;
-  }
-  
-  // Action-specific validation
-  switch (payload.action) {
-    case 'listTabs':
-    case 'fetchTabData':
-    case 'updateCell':
-    case 'addRow':
-    case 'readRange':
-      if (!payload.spreadsheetId) {
-        errors.push('spreadsheetId is required');
-        needsNormalization = true;
-      }
-      break;
-    case 'discoverAll':
-    case 'health':
-      // No additional validation needed
-      break;
-    case 'batch':
-      if (!payload.data || !Array.isArray(payload.data)) {
-        errors.push('data array is required for batch operations');
-      }
-      break;
-    default:
-      errors.push('Unknown action: ' + payload.action);
-  }
-  
-  return {
-    valid: errors.length === 0,
-    errors: errors,
-    needsNormalization: needsNormalization
-  };
-}
-
-/**
- * Attempts to normalize payload using hidden parser service
- */
-function tryHiddenParser(payload) {
-  const hiddenParserUrl = PropertiesService.getScriptProperties().getProperty('HIDDEN_PARSER_URL');
-  if (!hiddenParserUrl) {
-    console.log('Hidden parser not configured, skipping normalization');
-    return null;
-  }
-  
-  try {
-    const response = UrlFetchApp.fetch(hiddenParserUrl + '/normalize', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      payload: JSON.stringify({ raw: payload }),
-      muteHttpExceptions: true
-    });
-    
-    if (response.getResponseCode() === 200) {
-      const result = JSON.parse(response.getContentText());
-      if (result.ok && result.data) {
-        console.log('Hidden parser successfully normalized payload');
-        return result.data;
-      }
-    }
-    
-    console.log('Hidden parser failed to normalize payload');
-    return null;
-    
-  } catch (error) {
-    console.error('Hidden parser error:', error);
-    return null;
-  }
-}
-
-/**
- * Routes and processes actions
- */
-function processAction(payload) {
-  const { action, options = {} } = payload;
-  
-  try {
-    let result;
-    
-    switch (action) {
-      case 'listTabs':
-        result = handleListTabs(payload.spreadsheetId, options);
-        break;
-      case 'fetchTabData':
-        result = handleFetchTabData(payload.spreadsheetId, payload.tabName, options);
-        break;
-      case 'updateCell':
-        result = handleUpdateCell(payload.spreadsheetId, payload.tabName, payload.range, payload.data, options);
-        break;
-      case 'addRow':
-        result = handleAddRow(payload.spreadsheetId, payload.tabName, payload.data, options);
-        break;
-      case 'readRange':
-        result = handleReadRange(payload.spreadsheetId, payload.tabName, payload.range, options);
-        break;
-      case 'discoverAll':
-        result = handleDiscoverAll(options);
-        break;
-      case 'batch':
-        result = handleBatch(payload.data, options);
-        break;
-      case 'health':
-        result = handleHealth();
-        break;
-      default:
-        return createErrorResponse('Unknown action: ' + action, 400);
-    }
-    
-    return createSuccessResponse(result);
-    
-  } catch (error) {
-    console.error('Action processing error:', error);
-    return createErrorResponse('Action failed: ' + error.message, 500);
-  }
-}
-
-/**
- * Lists all tabs in a spreadsheet
- */
-function handleListTabs(spreadsheetId, options = {}) {
-  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const sheets = spreadsheet.getSheets();
-  
-  const tabs = sheets.map(sheet => ({
-    name: sheet.getName(),
-    id: sheet.getSheetId(),
-    index: sheet.getIndex(),
-    rowCount: sheet.getLastRow(),
-    columnCount: sheet.getLastColumn(),
-    hidden: sheet.isSheetHidden()
-  }));
-  
-  writeAudit('listTabs', { spreadsheetId, tabCount: tabs.length }, options.author);
-  
-  return {
-    spreadsheetId: spreadsheetId,
-    spreadsheetName: spreadsheet.getName(),
-    sheets: tabs,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Fetches tab data with schema analysis
- */
-function handleFetchTabData(spreadsheetId, tabName, options = {}) {
-  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const sheet = spreadsheet.getSheetByName(tabName);
-  
-  if (!sheet) {
-    throw new Error(`Tab "${tabName}" not found`);
-  }
-  
-  const lastRow = sheet.getLastRow();
-  const lastCol = sheet.getLastColumn();
-  
-  if (lastRow === 0 || lastCol === 0) {
-    return {
-      spreadsheetId: spreadsheetId,
-      tabName: tabName,
-      data: [],
-      schema: {},
-      isEmpty: true,
-      timestamp: new Date().toISOString()
-    };
-  }
-  
-  // Get data range
-  const range = sheet.getRange(1, 1, lastRow, lastCol);
-  const values = range.getValues();
-  
-  // Detect headers and analyze schema
-  const headers = detectHeaders(values);
-  const schema = analyzeColumns(values, headers);
-  
-  // Convert to objects if headers detected
-  let data = values;
-  if (headers.detected) {
-    data = values.slice(1).map(row => {
-      const obj = {};
-      headers.names.forEach((header, index) => {
-        obj[header] = row[index] || '';
-      });
-      return obj;
+    return jsonResponse(500, { 
+      success: false, 
+      error: 'Internal server error: ' + String(error),
+      payload: payload ? 'payload exists' : 'payload is null/undefined'
     });
   }
-  
-  writeAudit('fetchTabData', { 
-    spreadsheetId, 
-    tabName, 
-    rowCount: lastRow, 
-    columnCount: lastCol 
-  }, options.author);
-  
-  return {
-    spreadsheetId: spreadsheetId,
-    tabName: tabName,
-    data: data,
-    schema: schema,
-    headers: headers,
-    rowCount: lastRow,
-    columnCount: lastCol,
-    isEmpty: false,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Updates a single cell
- */
-function handleUpdateCell(spreadsheetId, tabName, range, data, options = {}) {
-  if (options.dryRun) {
-    return {
-      action: 'updateCell',
-      spreadsheetId: spreadsheetId,
-      tabName: tabName,
-      range: range,
-      data: data,
-      dryRun: true,
-      timestamp: new Date().toISOString()
-    };
-  }
-  
-  createSnapshotIfNeeded(spreadsheetId, tabName, options);
-  
-  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const sheet = spreadsheet.getSheetByName(tabName);
-  
-  if (!sheet) {
-    throw new Error(`Tab "${tabName}" not found`);
-  }
-  
-  const cellRange = sheet.getRange(range);
-  const sanitizedValue = sanitizeCell(data.value);
-  
-  cellRange.setValue(sanitizedValue);
-  
-  writeAudit('updateCell', {
-    spreadsheetId,
-    tabName,
-    range,
-    oldValue: cellRange.getValue(),
-    newValue: sanitizedValue
-  }, options.author);
-  
-  return {
-    action: 'updateCell',
-    spreadsheetId: spreadsheetId,
-    tabName: tabName,
-    range: range,
-    success: true,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Adds a new row to a sheet
- */
-function handleAddRow(spreadsheetId, tabName, data, options = {}) {
-  if (options.dryRun) {
-    return {
-      action: 'addRow',
-      spreadsheetId: spreadsheetId,
-      tabName: tabName,
-      data: data,
-      dryRun: true,
-      timestamp: new Date().toISOString()
-    };
-  }
-  
-  createSnapshotIfNeeded(spreadsheetId, tabName, options);
-  
-  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const sheet = spreadsheet.getSheetByName(tabName);
-  
-  if (!sheet) {
-    throw new Error(`Tab "${tabName}" not found`);
-  }
-  
-  // Sanitize all values in the row
-  const sanitizedData = Array.isArray(data) 
-    ? data.map(sanitizeCell)
-    : Object.values(data).map(sanitizeCell);
-  
-  sheet.appendRow(sanitizedData);
-  
-  writeAudit('addRow', {
-    spreadsheetId,
-    tabName,
-    data: sanitizedData,
-    newRowNumber: sheet.getLastRow()
-  }, options.author);
-  
-  return {
-    action: 'addRow',
-    spreadsheetId: spreadsheetId,
-    tabName: tabName,
-    rowNumber: sheet.getLastRow(),
-    success: true,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Reads a specific range
- */
-function handleReadRange(spreadsheetId, tabName, range, options = {}) {
-  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const sheet = spreadsheet.getSheetByName(tabName);
-  
-  if (!sheet) {
-    throw new Error(`Tab "${tabName}" not found`);
-  }
-  
-  const cellRange = sheet.getRange(range);
-  const values = cellRange.getValues();
-  
-  writeAudit('readRange', {
-    spreadsheetId,
-    tabName,
-    range,
-    cellCount: values.length * (values[0] ? values[0].length : 0)
-  }, options.author);
-  
-  return {
-    spreadsheetId: spreadsheetId,
-    tabName: tabName,
-    range: range,
-    data: values,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Discovers all accessible spreadsheets
- */
-function handleDiscoverAll(options = {}) {
-  const files = DriveApp.getFilesByType(MimeType.GOOGLE_SHEETS);
-  const spreadsheets = [];
-  
-  while (files.hasNext() && spreadsheets.length < 50) { // Limit to 50 for performance
-    const file = files.next();
-    try {
-      spreadsheets.push({
-        id: file.getId(),
-        name: file.getName(),
-        url: file.getUrl(),
-        lastModified: file.getLastUpdated().toISOString(),
-        owner: file.getOwner().getEmail()
-      });
-    } catch (error) {
-      // Skip files we can't access
-      console.log('Skipping inaccessible file:', file.getName());
-    }
-  }
-  
-  writeAudit('discoverAll', { count: spreadsheets.length }, options.author);
-  
-  return {
-    spreadsheets: spreadsheets,
-    count: spreadsheets.length,
-    timestamp: new Date().toISOString()
-  };
-}
-
-/**
- * Handles batch operations
- */
-function handleBatch(actions, options = {}) {
-  const results = [];
-  
-  for (const action of actions) {
-    try {
-      const result = processAction({ ...action, options });
-      results.push({
-        success: true,
-        action: action.action,
-        result: result
-      });
-    } catch (error) {
-      results.push({
-        success: false,
-        action: action.action,
-        error: error.message
-      });
-    }
-  }
-  
-  writeAudit('batch', { actionCount: actions.length, successCount: results.filter(r => r.success).length }, options.author);
-  
-  return {
-    results: results,
-    totalActions: actions.length,
-    successCount: results.filter(r => r.success).length,
-    timestamp: new Date().toISOString()
-  };
 }
 
 /**
  * Health check endpoint
  */
-function handleHealth() {
-  const properties = PropertiesService.getScriptProperties();
+function handleHealth(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleHealth' });
+  }
   
-  return {
+  const props = PropertiesService.getScriptProperties();
+  return jsonResponse(200, {
+    success: true,
     status: 'healthy',
+    version: '1.0.1',
     timestamp: new Date().toISOString(),
-    configuration: {
-      apiToken: !!properties.getProperty('API_TOKEN'),
-      hiddenParser: !!properties.getProperty('HIDDEN_PARSER_URL')
-    },
-    version: '1.0.0'
-  };
-}
-
-/**
- * Detects if first row contains headers
- */
-function detectHeaders(values) {
-  if (values.length === 0) {
-    return { detected: false, names: [] };
-  }
-  
-  const firstRow = values[0];
-  const hasHeaders = firstRow.every(cell => 
-    typeof cell === 'string' && 
-    cell.trim().length > 0 && 
-    !/^\d+$/.test(cell.trim())
-  );
-  
-  return {
-    detected: hasHeaders,
-    names: hasHeaders ? firstRow.map(cell => cell.toString().trim()) : []
-  };
-}
-
-/**
- * Analyzes column types and patterns
- */
-function analyzeColumns(values, headers) {
-  if (values.length <= 1) {
-    return {};
-  }
-  
-  const schema = {};
-  const dataRows = headers.detected ? values.slice(1) : values;
-  const columnNames = headers.detected ? headers.names : values[0].map((_, i) => `Column${i + 1}`);
-  
-  columnNames.forEach((name, index) => {
-    const columnData = dataRows.map(row => row[index]).filter(cell => cell !== null && cell !== '');
-    
-    if (columnData.length === 0) {
-      schema[name] = { type: 'empty', samples: [] };
-      return;
+    features: {
+      authentication: !!props.getProperty('API_TOKEN'),
+      hiddenParser: !!props.getProperty('HIDDEN_PARSER_URL'),
+      auditLogging: true,
+      snapshots: true
     }
+  });
+}
+
+/**
+ * Lists all tabs in a spreadsheet
+ */
+function handleListTabs(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleListTabs' });
+  }
+  
+  const { spreadsheetId } = payload;
+  
+  if (!spreadsheetId) {
+    return jsonResponse(400, { success: false, error: 'spreadsheetId is required' });
+  }
+  
+  try {
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const sheets = spreadsheet.getSheets();
     
-    // Analyze data types
-    const types = {
-      number: 0,
-      date: 0,
-      boolean: 0,
-      string: 0
-    };
-    
-    columnData.forEach(cell => {
-      if (typeof cell === 'number') {
-        types.number++;
-      } else if (cell instanceof Date) {
-        types.date++;
-      } else if (typeof cell === 'boolean') {
-        types.boolean++;
-      } else {
-        types.string++;
-      }
+    const tabList = sheets.map(sheet => ({
+      name: sheet.getName(),
+      gid: sheet.getSheetId(),
+      rows: sheet.getMaxRows(),
+      cols: sheet.getMaxColumns(),
+      hidden: sheet.isSheetHidden()
+    }));
+
+    return jsonResponse(200, { 
+      success: true, 
+      sheets: tabList,
+      spreadsheetName: spreadsheet.getName(),
+      timestamp: new Date().toISOString()
     });
     
-    const totalCells = columnData.length;
-    const dominantType = Object.keys(types).reduce((a, b) => types[a] > types[b] ? a : b);
-    
-    schema[name] = {
-      type: dominantType,
-      confidence: types[dominantType] / totalCells,
-      samples: columnData.slice(0, 3),
-      uniqueValues: [...new Set(columnData)].length,
-      totalValues: totalCells
-    };
-  });
-  
-  return schema;
-}
-
-/**
- * Sanitizes cell values to prevent formula injection
- */
-function sanitizeCell(value) {
-  if (typeof value !== 'string') {
-    return value;
-  }
-  
-  // Remove leading = + - @ to prevent formula injection
-  if (/^[=+\-@]/.test(value)) {
-    return "'" + value; // Prefix with single quote to make it literal
-  }
-  
-  return value;
-}
-
-/**
- * Creates audit log entry
- */
-function writeAudit(action, details, author = 'unknown') {
-  try {
-    const metaSpreadsheetId = PropertiesService.getScriptProperties().getProperty(META_SPREADSHEET_PROP);
-    if (!metaSpreadsheetId) {
-      console.log('Meta spreadsheet not configured, skipping audit');
-      return;
-    }
-    
-    const metaSpreadsheet = SpreadsheetApp.openById(metaSpreadsheetId);
-    let auditSheet = metaSpreadsheet.getSheetByName(AUDIT_SHEET_NAME);
-    
-    if (!auditSheet) {
-      auditSheet = metaSpreadsheet.insertSheet(AUDIT_SHEET_NAME);
-      auditSheet.getRange(1, 1, 1, 6).setValues([
-        ['Timestamp', 'Action', 'Author', 'Details', 'Session', 'Status']
-      ]);
-    }
-    
-    auditSheet.appendRow([
-      new Date(),
-      action,
-      author,
-      JSON.stringify(details),
-      Session.getActiveUser().getEmail(),
-      'success'
-    ]);
-    
   } catch (error) {
-    console.error('Audit logging failed:', error);
+    console.error('handleListTabs error:', error);
+    
+    if (error.message.includes('Requested entity was not found')) {
+      return jsonResponse(404, { success: false, error: 'Spreadsheet not found or access denied' });
+    }
+    
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Failed to access spreadsheet: ' + String(error) 
+    });
   }
 }
 
 /**
- * Creates snapshot before write operations
+ * Fetches tab data with schema analysis
  */
-function createSnapshotIfNeeded(spreadsheetId, tabName, options = {}) {
-  if (options.skipSnapshot) {
-    return;
+function handleFetchTabData(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleFetchTabData' });
   }
   
+  const { spreadsheetId, tabName, options = {} } = payload;
+  
+  if (!spreadsheetId) {
+    return jsonResponse(400, { success: false, error: 'spreadsheetId is required' });
+  }
+  
+  if (!tabName) {
+    return jsonResponse(400, { success: false, error: 'tabName is required' });
+  }
+  
+  const sampleMaxRows = options.sampleMaxRows || 500;
+
   try {
     const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
     const sheet = spreadsheet.getSheetByName(tabName);
     
     if (!sheet) {
-      return;
+      return jsonResponse(404, { success: false, error: `Tab '${tabName}' not found` });
     }
+
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
     
-    // Create snapshot folder if it doesn't exist
-    const folders = DriveApp.getFoldersByName(SNAPSHOT_FOLDER_NAME);
-    let snapshotFolder;
-    
-    if (folders.hasNext()) {
-      snapshotFolder = folders.next();
-    } else {
-      snapshotFolder = DriveApp.createFolder(SNAPSHOT_FOLDER_NAME);
+    if (lastRow === 0 || lastCol === 0) {
+      return jsonResponse(200, {
+        success: true,
+        data: {
+          sheetName: tabName,
+          dimensions: { rows: 0, cols: 0, sampledRows: 0 },
+          headers: [],
+          schema: [],
+          sampleValues: []
+        }
+      });
     }
+
+    // Determine data range to sample
+    const sampleRows = Math.min(lastRow, sampleMaxRows);
+    const dataRange = `A1:${columnToLetter(lastCol)}${sampleRows}`;
+    const values = sheet.getRange(dataRange).getValues();
+
+    // Detect headers
+    const headerInfo = detectHeaders(values);
     
-    // Create a copy of the spreadsheet
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const snapshotName = `${spreadsheet.getName()}_${tabName}_${timestamp}`;
-    
-    const file = DriveApp.getFileById(spreadsheetId);
-    const snapshot = file.makeCopy(snapshotName, snapshotFolder);
-    
-    console.log(`Snapshot created: ${snapshot.getId()}`);
-    
+    // Analyze schema
+    const schema = analyzeColumns(values, headerInfo);
+
+    return jsonResponse(200, {
+      success: true,
+      data: {
+        sheetName: tabName,
+        dimensions: { 
+          rows: lastRow, 
+          cols: lastCol, 
+          sampledRows: sampleRows 
+        },
+        headers: headerInfo.detected,
+        headerRowIndex: headerInfo.headerRowIndex,
+        schema: schema,
+        sampleValues: values
+      },
+      timestamp: new Date().toISOString()
+    });
+
   } catch (error) {
-    console.error('Snapshot creation failed:', error);
+    console.error('handleFetchTabData error:', error);
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Failed to fetch tab data: ' + String(error) 
+    });
   }
 }
 
 /**
- * Creates success response
+ * Reads a specific range
  */
-function createSuccessResponse(data) {
-  return ContentService
-    .createTextOutput(JSON.stringify({
+function handleReadRange(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleReadRange' });
+  }
+  
+  const { spreadsheetId, tabName, range } = payload;
+
+  if (!spreadsheetId) {
+    return jsonResponse(400, { success: false, error: 'spreadsheetId is required' });
+  }
+  
+  if (!tabName) {
+    return jsonResponse(400, { success: false, error: 'tabName is required' });
+  }
+  
+  if (!range) {
+    return jsonResponse(400, { success: false, error: 'range is required' });
+  }
+
+  try {
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const sheet = spreadsheet.getSheetByName(tabName);
+    
+    if (!sheet) {
+      return jsonResponse(404, { success: false, error: `Tab '${tabName}' not found` });
+    }
+
+    const values = sheet.getRange(range).getValues();
+
+    return jsonResponse(200, {
       success: true,
-      ...data
-    }))
-    .setMimeType(ContentService.MimeType.JSON);
+      data: {
+        range: range,
+        values: values,
+        sheetName: tabName
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('handleReadRange error:', error);
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Failed to read range: ' + String(error) 
+    });
+  }
 }
 
 /**
- * Creates error response
+ * Updates a single cell
  */
-function createErrorResponse(message, code = 400, details = null) {
-  const response = {
-    success: false,
-    error: message,
-    code: code
+function handleUpdateCell(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleUpdateCell' });
+  }
+  
+  const { spreadsheetId, tabName, range, data, options = {} } = payload;
+  
+  if (!spreadsheetId) {
+    return jsonResponse(400, { success: false, error: 'spreadsheetId is required' });
+  }
+  
+  if (!tabName) {
+    return jsonResponse(400, { success: false, error: 'tabName is required' });
+  }
+  
+  if (!range) {
+    return jsonResponse(400, { success: false, error: 'range is required' });
+  }
+  
+  const value = data?.value;
+
+  // Handle dry run
+  if (options.dryRun) {
+    return jsonResponse(200, {
+      success: true,
+      dryRun: true,
+      preview: {
+        action: 'updateCell',
+        spreadsheetId,
+        tabName,
+        range,
+        newValue: sanitizeCell(value)
+      }
+    });
+  }
+
+  try {
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const sheet = spreadsheet.getSheetByName(tabName);
+    
+    if (!sheet) {
+      return jsonResponse(404, { success: false, error: `Tab '${tabName}' not found` });
+    }
+
+    // Create snapshot if needed
+    const snapshot = createSnapshotIfNeeded(spreadsheet, sheet, 'updateCell');
+
+    // Sanitize and set value
+    const sanitizedValue = sanitizeCell(value);
+    sheet.getRange(range).setValue(sanitizedValue);
+
+    // Log the operation
+    writeAudit({
+      action: 'updateCell',
+      target: { spreadsheetId, tabName, range },
+      data: { value: sanitizedValue },
+      options: options
+    }, {
+      message: 'Cell updated successfully',
+      snapshot: snapshot
+    });
+
+    return jsonResponse(200, {
+      success: true,
+      result: {
+        range: range,
+        newValue: sanitizedValue,
+        snapshot: snapshot
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('handleUpdateCell error:', error);
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Failed to update cell: ' + String(error) 
+    });
+  }
+}
+
+/**
+ * Adds a new row
+ */
+function handleAddRow(payload) {
+  // Add safety check
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleAddRow' });
+  }
+  
+  const { spreadsheetId, tabName, data, options = {} } = payload;
+
+  if (!spreadsheetId) {
+    return jsonResponse(400, { success: false, error: 'spreadsheetId is required' });
+  }
+  
+  if (!tabName) {
+    return jsonResponse(400, { success: false, error: 'tabName is required' });
+  }
+
+  try {
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const sheet = spreadsheet.getSheetByName(tabName);
+    
+    if (!sheet) {
+      return jsonResponse(404, { success: false, error: `Tab '${tabName}' not found` });
+    }
+
+    // Prepare row data
+    let rowData = [];
+    
+    if (Array.isArray(data)) {
+      rowData = data.map(cell => sanitizeCell(cell));
+    } else if (typeof data === 'object' && data !== null) {
+      // Map object keys to column positions
+      const lastCol = sheet.getLastColumn();
+      const headerValues = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+      
+      rowData = headerValues.map(header => {
+        const value = data[header];
+        return sanitizeCell(value || '');
+      });
+    } else {
+      return jsonResponse(400, { success: false, error: 'Invalid data format for addRow' });
+    }
+
+    // Handle dry run
+    if (options.dryRun) {
+      return jsonResponse(200, {
+        success: true,
+        dryRun: true,
+        preview: rowData
+      });
+    }
+
+    // Create snapshot if needed
+    const snapshot = createSnapshotIfNeeded(spreadsheet, sheet, 'addRow');
+
+    // Add the row
+    sheet.appendRow(rowData);
+
+    // Log the operation
+    writeAudit({
+      action: 'addRow',
+      target: { spreadsheetId, tabName },
+      data: { appendedRow: rowData },
+      options: options
+    }, {
+      message: 'Row added successfully',
+      snapshot: snapshot
+    });
+
+    return jsonResponse(200, {
+      success: true,
+      result: {
+        appended: 1,
+        rowData: rowData,
+        snapshot: snapshot
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('handleAddRow error:', error);
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Failed to add row: ' + String(error) 
+    });
+  }
+}
+
+/**
+ * Discovers all accessible spreadsheets (limited for performance)
+ */
+function handleDiscoverAll(payload) {
+  // Add safety check (though this function doesn't need spreadsheetId)
+  if (!payload) {
+    return jsonResponse(400, { success: false, error: 'Payload is undefined in handleDiscoverAll' });
+  }
+  
+  try {
+    const files = DriveApp.searchFiles(
+      "mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+    );
+    
+    const result = { 
+      files: [], 
+      totalSheets: 0, 
+      lastDiscovered: new Date().toISOString() 
+    };
+    
+    let count = 0;
+    const maxFiles = 50; // Limit for performance
+
+    while (files.hasNext() && count < maxFiles) {
+      try {
+        const file = files.next();
+        const spreadsheet = SpreadsheetApp.openById(file.getId());
+        const sheets = spreadsheet.getSheets();
+        
+        const fileInfo = {
+          id: file.getId(),
+          name: file.getName(),
+          url: file.getUrl(),
+          lastModified: file.getLastUpdated().toISOString(),
+          sheets: sheets.map(sheet => ({
+            name: sheet.getName(),
+            gid: sheet.getSheetId(),
+            hidden: sheet.isSheetHidden()
+          }))
+        };
+        
+        result.files.push(fileInfo);
+        result.totalSheets += sheets.length;
+        count++;
+        
+      } catch (error) {
+        console.warn('Error processing file during discovery:', error);
+        // Continue with next file
+      }
+    }
+
+    return jsonResponse(200, { success: true, data: result });
+
+  } catch (error) {
+    console.error('handleDiscoverAll error:', error);
+    return jsonResponse(400, { 
+      success: false, 
+      error: 'Discovery failed: ' + String(error) 
+    });
+  }
+}
+
+/**
+ * Utility Functions
+ */
+
+function jsonResponse(status, body) {
+  const output = ContentService.createTextOutput(JSON.stringify(body))
+    .setMimeType(ContentService.MimeType.JSON);
+  // Note: Apps Script doesn't allow setting HTTP status codes directly
+  return output;
+}
+
+function quickValidate(payload) {
+  const errors = [];
+  
+  if (!payload || typeof payload !== 'object') {
+    errors.push('payload must be a valid object');
+    return { valid: false, errors: errors };
+  }
+  
+  const { action, spreadsheetId, tabName, range } = payload;
+
+  if (!action) {
+    errors.push('action is required');
+  }
+
+  if (action !== 'discoverAll' && action !== 'health' && !spreadsheetId) {
+    errors.push('spreadsheetId is required');
+  }
+
+  const needsTab = ['fetchTabData', 'updateCell', 'addRow', 'readRange'];
+  if (needsTab.includes(action) && !tabName) {
+    errors.push(`tabName is required for ${action}`);
+  }
+
+  if (action === 'updateCell' && !range) {
+    errors.push('range is required for updateCell');
+  }
+  
+  if (action === 'readRange' && !range) {
+    errors.push('range is required for readRange');
+  }
+
+  return { valid: errors.length === 0, errors: errors };
+}
+
+function detectHeaders(values) {
+  if (!values || values.length === 0) {
+    return { detected: [], headerRowIndex: -1, confidence: 0 };
+  }
+
+  const maxRowsToCheck = Math.min(3, values.length);
+  
+  for (let rowIndex = 0; rowIndex < maxRowsToCheck; rowIndex++) {
+    const row = values[rowIndex] || [];
+    const confidence = calculateHeaderConfidence(row, values, rowIndex);
+    
+    if (confidence > 0.7) {
+      const normalizedHeaders = row.map(cell => 
+        String(cell || '').trim() || `Column${row.indexOf(cell) + 1}`
+      );
+      
+      return { 
+        detected: normalizedHeaders, 
+        headerRowIndex: rowIndex, 
+        confidence: confidence 
+      };
+    }
+  }
+
+  // Fallback: generate generic headers
+  const maxCols = Math.max(...values.map(row => row.length));
+  const generatedHeaders = [];
+  for (let i = 0; i < maxCols; i++) {
+    generatedHeaders.push(`Column${i + 1}`);
+  }
+
+  return { 
+    detected: generatedHeaders, 
+    headerRowIndex: 0, 
+    confidence: 0.3,
+    generated: true 
+  };
+}
+
+function calculateHeaderConfidence(row, values, rowIndex) {
+  if (!row || row.length === 0) return 0;
+
+  let nonEmptyCount = 0;
+  let stringCount = 0;
+  const normalized = [];
+
+  row.forEach(cell => {
+    const str = String(cell || '').trim();
+    if (str !== '') nonEmptyCount++;
+    if (str !== '' && isNaN(cell)) stringCount++;
+    normalized.push(str.toLowerCase());
+  });
+
+  const uniqueCount = new Set(normalized).size;
+  const nonEmptyRatio = nonEmptyCount / Math.max(1, row.length);
+  const stringRatio = stringCount / Math.max(1, row.length);
+  const uniqueRatio = uniqueCount / Math.max(1, row.length);
+
+  return Math.min(1, (nonEmptyRatio * 0.5) + (stringRatio * 0.3) + (uniqueRatio * 0.2));
+}
+
+function analyzeColumns(values, headerInfo) {
+  const headers = headerInfo.detected || [];
+  const startRow = Math.max(0, (headerInfo.headerRowIndex || 0) + 1);
+  const analysis = [];
+
+  for (let colIndex = 0; colIndex < headers.length; colIndex++) {
+    const columnData = [];
+    
+    for (let rowIndex = startRow; rowIndex < values.length; rowIndex++) {
+      const row = values[rowIndex] || [];
+      const cellValue = row[colIndex];
+      
+      if (cellValue !== null && cellValue !== undefined && String(cellValue).trim() !== '') {
+        columnData.push(cellValue);
+      }
+    }
+
+    const dataType = detectColumnDataType(columnData);
+    const stats = calculateColumnStats(columnData);
+    const inputType = suggestInputType(dataType);
+
+    analysis.push({
+      name: headers[colIndex] || `Column${colIndex + 1}`,
+      index: colIndex,
+      letter: columnToLetter(colIndex + 1),
+      dataType: dataType,
+      stats: stats,
+      inputType: inputType
+    });
+  }
+
+  return analysis;
+}
+
+function detectColumnDataType(data) {
+  if (!data || data.length === 0) {
+    return { type: 'empty', confidence: 1 };
+  }
+
+  const counts = { number: 0, date: 0, email: 0, url: 0, boolean: 0, text: 0 };
+  
+  data.forEach(value => {
+    const str = String(value).trim();
+    if (str === '') return;
+
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)) {
+      counts.email++;
+    } else if (/^https?:\/\/.+/.test(str)) {
+      counts.url++;
+    } else if (/^(true|false|yes|no|1|0)$/i.test(str)) {
+      counts.boolean++;
+    } else if (!isNaN(Number(str)) && isFinite(Number(str))) {
+      counts.number++;
+    } else if (!isNaN(Date.parse(str))) {
+      counts.date++;
+    } else {
+      counts.text++;
+    }
+  });
+
+  const total = Math.max(1, Object.values(counts).reduce((a, b) => a + b, 0));
+  let bestType = { type: 'text', confidence: 0.5 };
+
+  Object.entries(counts).forEach(([type, count]) => {
+    const confidence = count / total;
+    if (confidence > bestType.confidence) {
+      bestType = { type, confidence };
+    }
+  });
+
+  return bestType;
+}
+
+function calculateColumnStats(data) {
+  const nonEmptyCount = (data || []).filter(value => 
+    value !== null && value !== undefined && String(value).trim() !== ''
+  ).length;
+
+  return {
+    nonEmpty: nonEmptyCount,
+    sampleValues: (data || []).slice(0, 5)
+  };
+}
+
+function suggestInputType(dataType) {
+  const typeMap = {
+    'number': 'number',
+    'date': 'date',
+    'email': 'email',
+    'url': 'url',
+    'boolean': 'checkbox'
   };
   
-  if (details) {
-    response.details = details;
+  return typeMap[dataType.type] || 'text';
+}
+
+function columnToLetter(columnNumber) {
+  let result = '';
+  
+  while (columnNumber > 0) {
+    const remainder = (columnNumber - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    columnNumber = Math.floor((columnNumber - 1) / 26);
   }
   
-  return ContentService
-    .createTextOutput(JSON.stringify(response))
-    .setMimeType(ContentService.MimeType.JSON);
+  return result;
+}
+
+function sanitizeCell(value) {
+  if (value === null || value === undefined) return '';
+  
+  const str = String(value);
+  
+  // Prevent formula injection
+  if (/^[=+\-@]/.test(str)) {
+    return "'" + str;
+  }
+  
+  return str;
+}
+
+function createSnapshotIfNeeded(spreadsheet, sheet, action) {
+  const snapshotActions = ['updateCell', 'addRow'];
+  if (!snapshotActions.includes(action)) return null;
+
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const snapshotName = `${spreadsheet.getName()}_snapshot_${timestamp}`;
+    const copy = spreadsheet.copy(snapshotName);
+    
+    // Move to snapshots folder
+    const file = DriveApp.getFileById(copy.getId());
+    const folder = getOrCreateSnapshotFolder();
+    folder.addFile(file);
+    DriveApp.getRootFolder().removeFile(file);
+    
+    return {
+      snapshotId: copy.getId(),
+      snapshotName: snapshotName,
+      created: new Date().toISOString()
+    };
+  } catch (error) {
+    console.warn('Snapshot creation failed:', error);
+    return null;
+  }
+}
+
+function getOrCreateSnapshotFolder() {
+  const folders = DriveApp.getFoldersByName(SNAPSHOT_FOLDER_NAME);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  return DriveApp.createFolder(SNAPSHOT_FOLDER_NAME);
+}
+
+function writeAudit(operation, result) {
+  try {
+    const metaSpreadsheet = getOrCreateMetaSpreadsheet();
+    let auditSheet = metaSpreadsheet.getSheetByName(AUDIT_SHEET_NAME);
+    
+    if (!auditSheet) {
+      auditSheet = metaSpreadsheet.insertSheet(AUDIT_SHEET_NAME);
+      // Add headers
+      auditSheet.appendRow([
+        'Timestamp', 'Author', 'Action', 'Target', 'Data', 'Result', 'Notes'
+      ]);
+    }
+
+    const auditRow = [
+      new Date().toISOString(),
+      operation.options?.author || 'unknown',
+      operation.action,
+      JSON.stringify(operation.target || {}),
+      JSON.stringify(operation.data || {}),
+      JSON.stringify(result || {}),
+      result.message || ''
+    ];
+
+    auditSheet.appendRow(auditRow);
+  } catch (error) {
+    console.warn('Audit logging failed:', error);
+  }
+}
+
+function getOrCreateMetaSpreadsheet() {
+  const properties = PropertiesService.getScriptProperties();
+  const metaId = properties.getProperty(META_SPREADSHEET_PROP);
+
+  if (metaId) {
+    try {
+      return SpreadsheetApp.openById(metaId);
+    } catch (error) {
+      console.warn('Could not open existing meta spreadsheet:', error);
+    }
+  }
+
+  // Create new meta spreadsheet
+  const metaSpreadsheet = SpreadsheetApp.create('__SSA_META_SPREADSHEET__');
+  properties.setProperty(META_SPREADSHEET_PROP, metaSpreadsheet.getId());
+  
+  return metaSpreadsheet;
+}
+
+/**
+ * Calls the hidden parser service for data normalization
+ * @param {string} parserUrl - The hidden parser service URL
+ * @param {Object} rawPayload - The raw payload to normalize
+ * @returns {Object} Normalized payload or error
+ */
+function callHiddenParser(parserUrl, rawPayload) {
+  try {
+    const response = UrlFetchApp.fetch(`${parserUrl}/normalize`, {
+      method: 'POST',
+      contentType: 'application/json',
+      muteHttpExceptions: true,
+      payload: JSON.stringify({ raw: rawPayload }),
+      headers: {
+        'User-Agent': 'Smart-Spreadsheet-Assistant/1.0'
+      }
+    });
+    
+    const responseText = response.getContentText();
+    const result = JSON.parse(responseText);
+    
+    if (response.getResponseCode() !== 200) {
+      console.error('Hidden parser error:', response.getResponseCode(), responseText);
+      return { ok: false, error: `Parser returned ${response.getResponseCode()}` };
+    }
+    
+    return result;
+  } catch (error) {
+    console.error('Hidden parser request failed:', error);
+    return { ok: false, error: String(error) };
+  }
+}
+
+/**
+ * Setup function to configure API tokens and URLs
+ * Run this once after deployment to set up authentication
+ */
+function setupConfiguration() {
+  const properties = PropertiesService.getScriptProperties();
+  
+  // Generate a random API token if not set
+  let apiToken = properties.getProperty('API_TOKEN');
+  if (!apiToken) {
+    apiToken = Utilities.getUuid();
+    properties.setProperty('API_TOKEN', apiToken);
+    console.log('Generated new API token:', apiToken);
+  }
+  
+  // Log current configuration (without sensitive data)
+  console.log('Current configuration:');
+  console.log('- API_TOKEN: ' + (apiToken ? '[SET]' : '[NOT SET]'));
+  console.log('- HIDDEN_PARSER_URL: ' + (properties.getProperty('HIDDEN_PARSER_URL') || '[NOT SET]'));
+  console.log('- META_SPREADSHEET_ID: ' + (properties.getProperty(META_SPREADSHEET_PROP) || '[NOT SET]'));
+  
+  return {
+    apiToken: apiToken,
+    hiddenParserUrl: properties.getProperty('HIDDEN_PARSER_URL'),
+    metaSpreadsheetId: properties.getProperty(META_SPREADSHEET_PROP)
+  };
 }

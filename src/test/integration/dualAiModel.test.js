@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { GeminiService } from '../../services/geminiService'
+import GeminiService from '../../services/geminiService.js'
 import { HiddenParserService } from '../../services/hiddenParserService'
 import { AppsScriptService } from '../../services/appsScriptService'
 
